@@ -1,0 +1,27 @@
+# Core HTTP + HTML parsing
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+lxml>=5.2.1               # optional but speeds up BeautifulSoup
+
+# Data handling & progress bars
+pandas>=2.2.2
+tqdm>=4.66.4
+tabulate>=0.9.0
+
+# Database connectivity
+pymongo>=4.7.3
+
+# Web-scraping framework (used by the spider modules)
+scrapy>=2.11.1
+
+# PDF processing (for any PDF/HTML hybrid content)
+PyPDF2>=3.0.1
+
+# Date utilities (needed by earlier code that used dateutil)
+python-dateutil>=2.9.0.post0
+
+# Extra networking utilities / TLS tweaks
+urllib3>=2.2.1
+
+pdfminer.six>=20231228   # fast, pure-Python text extractor
+dateparser>=1.2.0        # robust “1 January 1980”, “01-01-1980”, … parser
