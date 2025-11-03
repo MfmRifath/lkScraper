@@ -6,7 +6,7 @@ client = MongoClient('mongodb+srv://mmfmrifath:8CJDr5O1wXffoV5i@paralegal-prod.z
 db = client["paralegal_prod"]
 collection = db["lex_prod"]
 
-json_files_directory = 'data/legislations/legislation_C'
+json_files_directory = 'data/legislations/legislation_test'
 
 for filename in os.listdir(json_files_directory):
     if filename.endswith('.json'):

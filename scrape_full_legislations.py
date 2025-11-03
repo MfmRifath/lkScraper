@@ -972,7 +972,9 @@ class MainHTMLProcessor:
             direct_text = self.clean_text(direct_text)
 
             # Try to extract a leading identifier from the direct text
-            id_match = re.match(r'^(\(\s*[a-z0-9ivxlcdm]+\s*\)|[A-Z]\.)\s+', direct_text, flags=re.IGNORECASE)
+            # IMPROVED: Handle leading quotes, spaces, and optional trailing spaces
+            # Examples: "(a) text", " (a) text", '" (a) text', "(2)(a)...", "(e)(i)..."
+            id_match = re.match(r'^[\s"\']*(\(\s*[a-z0-9ivxlcdm]+\s*\)|[A-Z]\.)\s*', direct_text, flags=re.IGNORECASE)
             if id_match:
                 identifier = id_match.group(1)
                 content = direct_text[id_match.end():].strip()
@@ -1323,19 +1325,53 @@ class MainHTMLProcessor:
             r'(?is)\b(This\s+(?:Act|Ordinance|Law|Regulation|Regulations)\s+may\s+be\s+cited\s+as\s+)',
             joined
         )
-        
+
         citation = None
         if m:
             start = m.start()
             window = joined[start:start + 600]
-            first_dot = window.find(".")
-            if first_dot != -1:
-                citation = self.clean_text(window[:first_dot + 1])
-        
+
+            # IMPROVED: Look for sentence-ending period, not abbreviations like "No."
+            # Match periods that are followed by:
+            # - End of string, OR
+            # - Space + capital letter (new sentence), OR
+            # - Space + "and" (continuation clause)
+            # But NOT periods in: No., Vol., etc.
+
+            # Find all periods and check which one ends the sentence
+            period_pos = -1
+            for match in re.finditer(r'\.', window):
+                pos = match.start()
+                # Check what follows the period
+                after = window[pos+1:pos+10].lstrip()
+
+                # Skip if it's an abbreviation (No., Vol., etc.)
+                before = window[max(0,pos-5):pos]
+                if re.search(r'(?i)\b(No|Vol|Art|Sec|Ch)\s*$', before):
+                    continue
+
+                # This looks like a sentence-ending period if:
+                # - Nothing after it (end of text)
+                # - Followed by capital letter or "and"
+                # - Followed by newline/paragraph break
+                if not after or after[0].isupper() or after.lower().startswith('and ') or after.startswith('\n'):
+                    period_pos = pos
+                    break
+
+            if period_pos != -1:
+                citation = self.clean_text(window[:period_pos + 1])
+
         if not citation and joined:
-            first = joined.split(".", 1)[0].strip()
-            if first and "cited as" in first.lower():
-                citation = self.clean_text(first + ".")
+            # IMPROVED FALLBACK: Don't split at first period blindly
+            # Look for the full citation sentence, handling "No." abbreviations
+            if "cited as" in joined.lower():
+                # Try to extract the full citation including "No. X of YEAR"
+                citation_match = re.search(
+                    r'(?is)(This\s+(?:Act|Ordinance|Law|Regulation|Regulations)\s+may\s+be\s+cited\s+as\s+[^.]+(?:No\.\s*\d+\s+of\s+\d{4})?[^.]*\.)',
+                    joined
+                )
+                if citation_match:
+                    citation = self.clean_text(citation_match.group(1))
 
         # Create new content array instead of modifying existing
         section["content"] = [citation] if citation else []
@@ -1698,18 +1734,39 @@ class MainHTMLProcessor:
             
             # Check for definition patterns in content
             if not is_interpretation_section:
-                definition_indicators = [
-                    r'unless\s+the\s+context\s+otherwise\s+requires',
+                # IMPROVED: Be more restrictive about interpretation section detection
+                # Only treat as interpretation if it has STRONG indicators, not just
+                # phrases that might appear in construction/application sections
+
+                # Strong indicators: explicit definition language
+                strong_definition_indicators = [
                     r'following\s+definitions?\s+shall\s+apply',
                     r'following\s+expressions?\s+shall\s+have',
                     r'words\s+and\s+expressions?\s+shall\s+have',
-                    r'In\s+this\s+(?:Chapter|Part|Act|section)',
                 ]
-                
-                for pattern in definition_indicators:
+
+                for pattern in strong_definition_indicators:
                     if re.search(pattern, raw_content[:500], re.I):
                         is_interpretation_section = True
                         break
+
+                # Weaker indicators: only treat as interpretation if combined with other signals
+                if not is_interpretation_section:
+                    # "In this Act" at the very start (first 200 chars) suggests definitions
+                    if re.search(r'^.{0,200}In\s+this\s+(?:Act|Ordinance|Law)', raw_content, re.I | re.DOTALL):
+                        is_interpretation_section = True
+                    # "unless the context otherwise requires" ONLY if:
+                    # 1. It appears at the very start (within first 150 characters)
+                    # 2. AND it's NOT inside a numbered subsection like "(1)"
+                    # If it's inside "(1)", it's a construction section with subsections, not definitions
+                    elif re.search(r'^.{0,150}unless\s+the\s+context\s+otherwise\s+requires', raw_content, re.I | re.DOTALL):
+                        # Check if it's inside a numbered subsection
+                        # Look for pattern like "(1)" before the phrase
+                        text_before_phrase = raw_content[:raw_content.lower().find('unless the context') + 50]
+                        has_subsection_marker = re.search(r'\(\s*\d+\s*\)', text_before_phrase)
+                        if not has_subsection_marker:
+                            # No subsection marker found, treat as interpretation
+                            is_interpretation_section = True
             
             final_content = []
             subsections = []
@@ -1770,26 +1827,130 @@ class MainHTMLProcessor:
                 
             else:
                 # Normal section processing (non-interpretation)
-                # Process illustrations and explanations
-                main_block, illu = self._split_off_illustrations_block(raw_content)
-                main_block, expl_blocks = self._split_off_explanations_blocks(main_block)
-                
-                # Try to extract subsections
-                subsections = self.extract_subsections_from_text(main_block)
-                
-                if subsections:
-                    # Has subsections - extract preface
-                    first_marker = re.search(r'(?m)^\s*(\(\s*[a-z0-9]\s*\)|\d+\.)\s+', main_block, re.I)
-                    if first_marker:
-                        preface = main_block[:first_marker.start()].strip()
+                # IMPROVED: Check if section has nested table structure for subsections
+                # If so, use table-based extraction to preserve hierarchy
+                has_nested_tables = False
+                for tbl in tables_to_process:
+                    nested_subsection_tables = tbl.find_all('table', cellspacing="2mm", recursive=True)
+                    if len(nested_subsection_tables) > 0:
+                        # Check if they contain subsectioncontent
+                        for nested_tbl in nested_subsection_tables:
+                            if nested_tbl.find('font', class_='subsectioncontent'):
+                                has_nested_tables = True
+                                break
+                    if has_nested_tables:
+                        break
+
+                if has_nested_tables:
+                    # Use table-based extraction to preserve hierarchy
+                    # Extract subsections from the table structure directly
+                    subsections = []
+                    for tbl in tables_to_process:
+                        # Get the parent font element that contains the section content
+                        section_content_font = tbl.find('font', class_='sectioncontent')
+                        if section_content_font:
+                            # First try: Extract nested subsections from inside this font element
+                            nested_subs = self.extract_nested_subsections(section_content_font)
+                            if nested_subs:
+                                subsections.extend(nested_subs)
+
+                            # Second try: Extract subsection tables that are siblings to sectioncontent
+                            # (e.g., legislation_A_7 where subsection tables are next to sectioncontent, not nested inside)
+                            # Get the parent element that contains both sectioncontent and subsection tables
+                            parent_elem = section_content_font.parent
+                            if parent_elem:
+                                # Find all subsection tables at this level
+                                sibling_tables = parent_elem.find_all('table', cellspacing="2mm", recursive=False)
+                                for sibling_tbl in sibling_tables:
+                                    subsection_font = sibling_tbl.find('font', class_='subsectioncontent')
+                                    if subsection_font:
+                                        # Extract this subsection
+                                        direct_text_parts = []
+                                        for child in subsection_font.children:
+                                            if isinstance(child, str):
+                                                direct_text_parts.append(child)
+                                            elif child.name != 'table':
+                                                direct_text_parts.append(child.get_text())
+
+                                        direct_text = ''.join(direct_text_parts).strip()
+                                        direct_text = self.clean_text(direct_text)
+
+                                        # Extract identifier
+                                        id_match = re.match(r'^[\s"\']*(\(\s*[a-z0-9ivxlcdm]+\s*\)|[A-Z]\.)\s*', direct_text, flags=re.IGNORECASE)
+                                        if id_match:
+                                            identifier = id_match.group(1)
+                                            content = direct_text[id_match.end():].strip()
+                                        else:
+                                            identifier = ""
+                                            content = direct_text
+
+                                        if content:
+                                            subsections.append({
+                                                "identifier": identifier,
+                                                "content": content,
+                                                "subsections": []
+                                            })
+
+                    # Extract preface (content before first subsection table)
+                    preface_text = []
+                    for tbl in tables_to_process:
+                        # Get direct text from sectioncontent fonts (not subsectioncontent)
+                        for font in tbl.find_all('font', class_='sectioncontent'):
+                            # IMPORTANT: Only get text BEFORE first nested table (preface only)
+                            # Don't include continuation text after subsections
+                            direct_text_parts = []
+                            found_table = False
+                            for child in font.children:
+                                # Stop when we hit the first nested table
+                                if child.name == 'table':
+                                    found_table = True
+                                    break
+                                # Only collect text before the first table
+                                if isinstance(child, str):
+                                    direct_text_parts.append(child)
+                                elif child.name != 'table':  # Include non-table elements like <a>, <b> etc
+                                    direct_text_parts.append(child.get_text())
+
+                            font_text = ''.join(direct_text_parts).strip()
+                            if font_text:
+                                preface_text.append(font_text)
+
+                    if preface_text:
+                        preface = ' '.join(preface_text)
+
+                        # Remove section number from the beginning (e.g., "7. ", "14A. ")
+                        if section_number:
+                            # Try to remove "7. " or "14A. " from the start
+                            section_pattern = rf'^\s*{re.escape(section_number)}\s*\.\s*'
+                            preface = re.sub(section_pattern, '', preface, count=1)
+
                         preface = self.clean_text(preface)
-                        if preface:
+                        # Don't include if it's empty or just the section number
+                        if preface and not re.match(r'^\d+[A-Z]?\.$', preface.strip()):
                             final_content = [preface]
                 else:
-                    # No subsections - use full content
-                    content = self.clean_text(main_block)
-                    if content:
-                        final_content = [content]
+                    # Fallback: Use text-based extraction (original logic)
+                    # Process illustrations and explanations
+                    main_block, illu = self._split_off_illustrations_block(raw_content)
+                    main_block, expl_blocks = self._split_off_explanations_blocks(main_block)
+
+                    # Try to extract subsections
+                    subsections = self.extract_subsections_from_text(main_block)
+
+                    if subsections:
+                        # Has subsections - extract preface
+                        first_marker = re.search(r'(?m)^\s*(\(\s*[a-z0-9]\s*\)|\d+\.)\s+', main_block, re.I)
+                        if first_marker:
+                            preface = main_block[:first_marker.start()].strip()
+                            preface = self.clean_text(preface)
+                            # Don't include if it's just the section number (e.g., "8.", "14.", etc.)
+                            if preface and not re.match(r'^\d+[A-Z]?\.$', preface.strip()):
+                                final_content = [preface]
+                    else:
+                        # No subsections - use full content
+                        content = self.clean_text(main_block)
+                        if content:
+                            final_content = [content]
             
             # Build section object
             section_data = {
@@ -7166,20 +7327,36 @@ class MainHTMLProcessor:
             sec_num = _extract_section_num(section)
             section_number_str = section.get("number", "")
 
+            # Debug section 373
+            if section_number_str == "373" and self.debug_mode:
+                print(f"  DEBUG: Processing section 373 assignment, sec_num={sec_num}")
+
             if not sec_num:
                 unassigned_sections.append(section)
                 continue
 
-            # SPECIAL CASE: Section 1 (Short title) should ALWAYS go to MAIN PART
-            # This prevents it from being incorrectly placed in PART IV or other parts
+            # SPECIAL CASE: Section 1 (Short title) - handle carefully
+            # In legislations with multiple PARTS (e.g., PART I, PART II), section 1 should go to MAIN PART
+            # But in legislations with only CHAPTERS (e.g., CHAPTER 6), section 1 should be assigned to that chapter
             if sec_num == 1:
-                # Check if section 1 is a "Short title" section
                 section_title = (section.get("title") or "").lower()
                 if "short title" in section_title or section_title.strip() in ["", "short title.", "short title"]:
-                    # Force Section 1 to MAIN PART by not assigning it to any target
-                    # It will be handled as an unassigned section and placed in MAIN PART
-                    unassigned_sections.append(section)
-                    continue
+                    # Check if there's a chapter/part that explicitly includes section 1 in its range
+                    # If yes, let it be assigned normally. If no, force to MAIN PART.
+                    has_explicit_target = False
+                    for target in routing_targets:
+                        target_min = target.get("min")
+                        target_max = target.get("max")
+                        # Check if this target explicitly starts from section 1
+                        if isinstance(target_min, int) and target_min == 1:
+                            has_explicit_target = True
+                            break
+
+                    if not has_explicit_target:
+                        # No target explicitly includes section 1, force to MAIN PART
+                        unassigned_sections.append(section)
+                        continue
+                    # If has_explicit_target is True, fall through to normal assignment logic
 
             # Find best matching target
             best_target = None
@@ -7223,16 +7400,16 @@ class MainHTMLProcessor:
                 section_assignments[section_number_str] = best_target
                 if self.debug_mode and ("12A" in section_number_str or "12a" in section_number_str.lower()):
                     print(f"  DEBUG: Section {section_number_str} assigned to {best_target.get('type')} {best_target.get('chapter_number', '')} [{best_target.get('min')}-{best_target.get('max')}]")
-                # Debug sections 92-101, 39, and 18
-                if self.debug_mode and sec_num and (92 <= sec_num <= 101 or sec_num == 39 or sec_num == 18):
+                # Debug sections 92-101, 39, 18, and 373
+                if self.debug_mode and sec_num and (92 <= sec_num <= 101 or sec_num == 39 or sec_num == 18 or sec_num == 373):
                     target_desc = f"{best_target.get('part_number', '')}"
                     if best_target.get('chapter_number'):
                         target_desc += f" / {best_target.get('chapter_number')}"
                     print(f"  DEBUG: Section {section_number_str} (num={sec_num}) assigned to {target_desc} [{best_target.get('min')}-{best_target.get('max')}], score={best_score}")
             else:
                 unassigned_sections.append(section)
-                # Debug unassigned sections 92-101, 39, and 18
-                if self.debug_mode and sec_num and (92 <= sec_num <= 101 or sec_num == 39 or sec_num == 18):
+                # Debug unassigned sections 92-101, 39, 18, and 373
+                if self.debug_mode and sec_num and (92 <= sec_num <= 101 or sec_num == 39 or sec_num == 18 or sec_num == 373):
                     print(f"  DEBUG: Section {section_number_str} (num={sec_num}) UNASSIGNED - no matching target")
                 if self.debug_mode and ("12A" in section_number_str or "12a" in section_number_str.lower()):
                     print(f"  DEBUG: Section {section_number_str} is UNASSIGNED (sec_num={sec_num}, no matching target)")
@@ -7263,7 +7440,16 @@ class MainHTMLProcessor:
         for section in all_sections:
             section_key = section.get("number", "")
             target = section_assignments.get(section_key)
-            
+
+            # Debug section 373
+            if section_key == "373" and self.debug_mode:
+                print(f"  DEBUG: Building structure for section 373")
+                print(f"    target: {target}")
+                if target:
+                    print(f"    part_number: {target.get('part_number')}")
+                    print(f"    chapter_number: {target.get('chapter_number')}")
+                    print(f"    type: {target.get('type')}")
+
             if target:
                 target_key = (
                     target.get("part_number", "MAIN PART"),
@@ -7272,11 +7458,15 @@ class MainHTMLProcessor:
                 )
             else:
                 target_key = ("MAIN PART", None, "unassigned")
-            
+
             if target_key not in target_sections:
                 target_sections[target_key] = {"target": target, "sections": []}
-            
+
             target_sections[target_key]["sections"].append(section)
+
+            # Debug section 373
+            if section_key == "373" and self.debug_mode:
+                print(f"    target_key: {target_key}")
         
         # DEBUG: Check which target_keys contain sections 23-79
         if self.debug_mode:

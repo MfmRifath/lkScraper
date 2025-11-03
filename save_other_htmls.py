@@ -25,49 +25,56 @@ class AmendmentScheduleHTMLScraper:
 
     def download_image(self, img_url, save_folder, base_url):
         """Download an image from the given URL."""
-        try:
-            # Convert relative URLs to absolute URLs
-            if not img_url.startswith(('http://', 'https://')):
-                img_url = urljoin(base_url, img_url)
-            
-            print(f"    Downloading image: {img_url}")
-            
-            # Get image content with timeout
-            response = self.session.get(img_url, timeout=30)
-            if response.status_code == 200:
-                # Parse the URL to get filename
-                parsed_url = urlparse(img_url)
-                filename = os.path.basename(parsed_url.path)
-                
-                # If no filename, generate one based on URL
-                if not filename or '.' not in filename:
-                    # Try to get extension from content type
-                    content_type = response.headers.get('content-type', '')
-                    extension = mimetypes.guess_extension(content_type) or '.jpg'
-                    filename = f"image_{abs(hash(img_url)) % 10000}{extension}"
-                
-                # Ensure we have a valid filename
-                if not filename:
-                    filename = f"image_{abs(hash(img_url)) % 10000}.jpg"
-                
-                # Create images folder
-                images_folder = os.path.join(save_folder, "images")
-                os.makedirs(images_folder, exist_ok=True)
-                
-                # Save image
-                image_path = os.path.join(images_folder, filename)
-                with open(image_path, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"    ✓ Image saved: {filename}")
-                return f"images/{filename}"  # Return relative path for HTML update
-            else:
-                print(f"    ✗ Failed to download image: {img_url} (Status: {response.status_code})")
-                return None
-                
-        except Exception as e:
-            print(f"    ✗ Error downloading image {img_url}: {str(e)}")
-            return None
+        # DISABLED: Image downloading is disabled to skip image downloads
+        print(f"    ⏭️  Skipping image download (disabled): {img_url}")
+        return None
+
+        # ============================================================
+        # ORIGINAL CODE BELOW (COMMENTED OUT TO DISABLE IMAGE DOWNLOADS)
+        # ============================================================
+        # try:
+        #     # Convert relative URLs to absolute URLs
+        #     if not img_url.startswith(('http://', 'https://')):
+        #         img_url = urljoin(base_url, img_url)
+        #
+        #     print(f"    Downloading image: {img_url}")
+        #
+        #     # Get image content with timeout
+        #     response = self.session.get(img_url, timeout=30)
+        #     if response.status_code == 200:
+        #         # Parse the URL to get filename
+        #         parsed_url = urlparse(img_url)
+        #         filename = os.path.basename(parsed_url.path)
+        #
+        #         # If no filename, generate one based on URL
+        #         if not filename or '.' not in filename:
+        #             # Try to get extension from content type
+        #             content_type = response.headers.get('content-type', '')
+        #             extension = mimetypes.guess_extension(content_type) or '.jpg'
+        #             filename = f"image_{abs(hash(img_url)) % 10000}{extension}"
+        #
+        #         # Ensure we have a valid filename
+        #         if not filename:
+        #             filename = f"image_{abs(hash(img_url)) % 10000}.jpg"
+        #
+        #         # Create images folder
+        #         images_folder = os.path.join(save_folder, "images")
+        #         os.makedirs(images_folder, exist_ok=True)
+        #
+        #         # Save image
+        #         image_path = os.path.join(images_folder, filename)
+        #         with open(image_path, 'wb') as f:
+        #             f.write(response.content)
+        #
+        #         print(f"    ✓ Image saved: {filename}")
+        #         return f"images/{filename}"  # Return relative path for HTML update
+        #     else:
+        #         print(f"    ✗ Failed to download image: {img_url} (Status: {response.status_code})")
+        #         return None
+        #
+        # except Exception as e:
+        #     print(f"    ✗ Error downloading image {img_url}: {str(e)}")
+        #     return None
 
     def process_images_in_html(self, html_content, base_url, save_folder):
         """Find and download all images in HTML content, then update HTML with local paths."""

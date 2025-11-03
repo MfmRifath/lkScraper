@@ -85,58 +85,65 @@ class MainHTMLScraper:
     
     def download_image(self, img_url, save_folder, base_url):
         """Download an image from the given URL, but skip if in skip list."""
-        try:
-            # Convert relative URLs to absolute URLs
-            if not img_url.startswith(('http://', 'https://')):
-                img_url = urljoin(base_url, img_url)
-            
-            # Parse the URL to get filename first
-            parsed_url = urlparse(img_url)
-            filename = os.path.basename(parsed_url.path)
-            
-            # If no filename, generate one based on URL (we need to make a request to get content type)
-            if not filename or '.' not in filename:
-                try:
-                    # Make a HEAD request to get content type without downloading full image
-                    head_response = self.session.head(img_url, timeout=10)
-                    content_type = head_response.headers.get('content-type', '')
-                    extension = mimetypes.guess_extension(content_type) or '.jpg'
-                    filename = f"image_{hash(img_url) % 10000}{extension}"
-                except:
-                    filename = f"image_{hash(img_url) % 10000}.jpg"
-            
-            # Ensure we have a valid filename
-            if not filename:
-                filename = f"image_{hash(img_url) % 10000}.jpg"
-            
-            # Check if this image should be skipped
-            if filename in self.skip_images:
-                print(f"  ⏭️  Skipping image (in skip list): {filename}")
-                return None
-            
-            print(f"  Downloading image: {img_url}")
-            
-            # Get image content
-            response = self.session.get(img_url, timeout=30)
-            if response.status_code == 200:
-                # Create images folder
-                images_folder = os.path.join(save_folder, "images")
-                os.makedirs(images_folder, exist_ok=True)
-                
-                # Save image
-                image_path = os.path.join(images_folder, filename)
-                with open(image_path, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"  ✓ Image saved: {filename}")
-                return f"images/{filename}"  # Return relative path for HTML update
-            else:
-                print(f"  ✗ Failed to download image: {img_url} (Status: {response.status_code})")
-                return None
-                
-        except Exception as e:
-            print(f"  ✗ Error downloading image {img_url}: {str(e)}")
-            return None
+        # DISABLED: Image downloading is disabled to skip image downloads
+        print(f"  ⏭️  Skipping image download (disabled): {img_url}")
+        return None
+
+        # ============================================================
+        # ORIGINAL CODE BELOW (COMMENTED OUT TO DISABLE IMAGE DOWNLOADS)
+        # ============================================================
+        # try:
+        #     # Convert relative URLs to absolute URLs
+        #     if not img_url.startswith(('http://', 'https://')):
+        #         img_url = urljoin(base_url, img_url)
+        #
+        #     # Parse the URL to get filename first
+        #     parsed_url = urlparse(img_url)
+        #     filename = os.path.basename(parsed_url.path)
+        #
+        #     # If no filename, generate one based on URL (we need to make a request to get content type)
+        #     if not filename or '.' not in filename:
+        #         try:
+        #             # Make a HEAD request to get content type without downloading full image
+        #             head_response = self.session.head(img_url, timeout=10)
+        #             content_type = head_response.headers.get('content-type', '')
+        #             extension = mimetypes.guess_extension(content_type) or '.jpg'
+        #             filename = f"image_{hash(img_url) % 10000}{extension}"
+        #         except:
+        #             filename = f"image_{hash(img_url) % 10000}.jpg"
+        #
+        #     # Ensure we have a valid filename
+        #     if not filename:
+        #         filename = f"image_{hash(img_url) % 10000}.jpg"
+        #
+        #     # Check if this image should be skipped
+        #     if filename in self.skip_images:
+        #         print(f"  ⏭️  Skipping image (in skip list): {filename}")
+        #         return None
+        #
+        #     print(f"  Downloading image: {img_url}")
+        #
+        #     # Get image content
+        #     response = self.session.get(img_url, timeout=30)
+        #     if response.status_code == 200:
+        #         # Create images folder
+        #         images_folder = os.path.join(save_folder, "images")
+        #         os.makedirs(images_folder, exist_ok=True)
+        #
+        #         # Save image
+        #         image_path = os.path.join(images_folder, filename)
+        #         with open(image_path, 'wb') as f:
+        #             f.write(response.content)
+        #
+        #         print(f"  ✓ Image saved: {filename}")
+        #         return f"images/{filename}"  # Return relative path for HTML update
+        #     else:
+        #         print(f"  ✗ Failed to download image: {img_url} (Status: {response.status_code})")
+        #         return None
+        #
+        # except Exception as e:
+        #     print(f"  ✗ Error downloading image {img_url}: {str(e)}")
+        #     return None
     
     def process_images_in_html(self, html_content, base_url, save_folder):
         """Find and download only images in the HTML body, then update HTML with local paths."""

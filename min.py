@@ -138,9 +138,9 @@ def main():
     }
     
     # Define paths - Update these as needed for your specific legislation folder
-    json_file_path = "data/json/legislation_D.json"
-    html_folder = "data/html/legislation_D"
-    data_folder = "data/legislations/legislation_D"
+    json_file_path = "data/json/legislation_A.json"
+    html_folder = "data/html/legislation_test"
+    data_folder = "data/legislations/legislation_test"
     
     print("Pipeline Configuration:")
     print(f"  JSON file: {json_file_path}")
@@ -232,30 +232,30 @@ def main():
     print()
 
     # Step 7: Convert schedule HTML files to PDF using Playwright
-    print("Step 7: Converting schedule HTML files to PDF with Playwright...")
-    try:
-        pdf_processor = SchedulePDFProcessor(html_folder, data_folder)
-        pdf_processor.debug_mode = True
+    # print("Step 7: Converting schedule HTML files to PDF with Playwright...")
+    # try:
+    #     pdf_processor = SchedulePDFProcessor(html_folder, data_folder)
+    #     pdf_processor.debug_mode = True
         
-        print("   Starting Playwright PDF conversion...")
-        processed_count, total_pdfs = pdf_processor.process_legislation_folders()
+    #     print("   Starting Playwright PDF conversion...")
+    #     processed_count, total_pdfs = pdf_processor.process_legislation_folders()
         
-        if total_pdfs > 0:
-            print("   Updating JSON files with PDF references...")
-            pdf_processor.update_json_with_pdf_references()
+    #     if total_pdfs > 0:
+    #         print("   Updating JSON files with PDF references...")
+    #         pdf_processor.update_json_with_pdf_references()
             
-            print(f"✓ Step 7 completed successfully")
-            print(f"  - Processed {processed_count} legislation folders")
-            print(f"  - Created {total_pdfs} PDF files using Playwright")
-        else:
-            print("⚠️  No PDF files were created. Check if schedule HTML files exist.")
+    #         print(f"✓ Step 7 completed successfully")
+    #         print(f"  - Processed {processed_count} legislation folders")
+    #         print(f"  - Created {total_pdfs} PDF files using Playwright")
+    #     else:
+    #         print("⚠️  No PDF files were created. Check if schedule HTML files exist.")
             
-    except Exception as e:
-        print(f"✗ Step 7 failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    print()
+    # except Exception as e:
+    #     print(f"✗ Step 7 failed: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    #     return False
+    # print()
     
     print("=" * 60)
     print("ALL STEPS COMPLETED SUCCESSFULLY!")
