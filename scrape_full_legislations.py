@@ -1627,8 +1627,61 @@ class MainHTMLProcessor:
 
             section_number = section_number_tag.text.strip() if section_number_tag else None
 
-
             amendment_info = self.extract_amendment_info(table)
+
+            # IMPROVED: Check if amendment marker indicates a different section than the content link
+            # This handles cases like legislation_A_17 section 7, where:
+            # - Amendment says "[7, 4 of 1991]" or "[§6, 4 of 1991]"
+            # - But content starts with "8." (belongs to next section)
+            # In this case, the table is for section 7, and section 8 should be extracted separately
+            # The § symbol indicates "section" in the amendment reference
+            import re
+            amendment_section_num = None
+            if amendment_info:
+                first_amendment = amendment_info[0].get("text", "")
+                # Extract section number from pattern like "[7, 4 of 1991]" or "[§6, 4 of 1991]"
+                match = re.match(r'\[\s*§?(\d+)\s*[,\]]', first_amendment)
+                if match:
+                    amendment_section_num = match.group(1)
+
+            # Flag to skip content extraction (for mismatch cases)
+            skip_content_extraction = False
+
+            # CASE 1: Section link exists - always trust it over amendment marker
+            # Amendment marker like "[7, 4 of 1991]" means "modified by section 7 of Act 4/1991"
+            # It does NOT mean this is section 7 of the current Act
+            if section_number and amendment_section_num and amendment_section_num != section_number:
+                if self.debug_mode:
+                    print(f"  [INFO] Section link says {section_number}, amendment marker says {amendment_section_num}")
+                    print(f"    Amendment markers refer to the amending Act, not current section")
+                    print(f"    Using section link: {section_number}")
+                # Keep section_number as is (from the content link)
+
+            # CASE 2: No content link but amendment marker exists
+            # DON'T use amendment marker as section number - it refers to the amending Act, not this section
+            # Instead, use sequential numbering if previous_section is available
+            elif not section_number and amendment_section_num:
+                if previous_section:
+                    # Try to get numeric value of previous section
+                    prev_num = previous_section.get('number', '')
+                    if prev_num and prev_num.replace('.', '').isdigit():
+                        try:
+                            next_num = int(float(prev_num)) + 1
+                            section_number = str(next_num)
+                            if self.debug_mode:
+                                print(f"  [SEQUENTIAL] No section link found. Previous section was {prev_num}, using sequential number {section_number}")
+                        except ValueError:
+                            section_number = amendment_section_num
+                            if self.debug_mode:
+                                print(f"  [FALLBACK] Could not parse previous section '{prev_num}', using amendment number '{section_number}'")
+                    else:
+                        section_number = amendment_section_num
+                        if self.debug_mode:
+                            print(f"  [FALLBACK] No valid previous section, using amendment number '{section_number}'")
+                else:
+                    section_number = amendment_section_num
+                    if self.debug_mode:
+                        print(f"  [FALLBACK] No previous section available, using amendment number '{section_number}' from '{first_amendment}'")
 
             # Extract title while excluding nested tables (which often contain amendment references)
             if section_title_tag:
@@ -1645,57 +1698,68 @@ class MainHTMLProcessor:
             # CRITICAL FIX: Extract ALL content from the table AND continuation tables
             all_text_parts = []
 
-            # Collect tables to process: main table + any continuation tables
+            # Collect tables to process: main table + any continuation tables (always needed for later checks)
             tables_to_process = [table]
 
-            # Check for continuation tables (tables immediately following without section number)
-            # FIXED: Only check for section LINK to determine if it's a new section
-            # sectionshorttitle can appear in continuation tables (e.g., definition terms)
-            next_table = table.find_next_sibling("table")
-            while next_table:
-                # Check if this is a NEW section (has section link)
-                # The definitive indicator of a new section is the consSelectedSection link
-                has_section_link = next_table.find("a", href=lambda href: href and "consSelectedSection" in href)
+            # Skip content extraction if amendment/content mismatch detected
+            if not skip_content_extraction:
 
-                # If it has a section link, it's definitely a new section
-                if has_section_link:
+                # Check for continuation tables (tables immediately following without section number)
+                # FIXED: Only check for section LINK to determine if it's a new section
+                # sectionshorttitle can appear in continuation tables (e.g., definition terms)
+                next_table = table.find_next_sibling("table")
+                while next_table:
+                    # Check if this is a NEW section (has section link)
+                    # The definitive indicator of a new section is the consSelectedSection link
+                    has_section_link = next_table.find("a", href=lambda href: href and "consSelectedSection" in href)
+
+                    # If it has a section link, it's definitely a new section
+                    if has_section_link:
+                        break
+
+                    # Check if it has an amendment marker - this also indicates a new section
+                    # Example: Section 7 "Repealed" has amendment [6, 4 of 1991] but no section link
+                    has_amendment = next_table.find("a", href=lambda href: href and "openSectionOrdinanceWindow" in href)
+                    if has_amendment:
+                        if self.debug_mode:
+                            print(f"  [CONTINUATION CHECK] Next table has amendment marker - treating as new section, not continuation")
+                        break
+
+                    # Check if it has section content (continuation table)
+                    has_section_content = next_table.find("font", class_="sectioncontent")
+                    has_subsection_content = next_table.find("font", class_="subsectioncontent")
+
+                    # If it has content and matches section table attributes, it's a continuation
+                    if has_section_content or has_subsection_content:
+                        if (next_table.get("cellpadding") == "0" and
+                            next_table.get("cellspacing") == "4mm" and
+                            next_table.get("align") == "center" and
+                            next_table.get("border") == "0"):
+                            tables_to_process.append(next_table)
+                            next_table = next_table.find_next_sibling("table")
+                            continue
                     break
 
-                # Check if it has section content (continuation table)
-                has_section_content = next_table.find("font", class_="sectioncontent")
-                has_subsection_content = next_table.find("font", class_="subsectioncontent")
+                # Extract content from all tables (main + continuations)
+                for tbl in tables_to_process:
+                    # Get content from sectioncontent tags
+                    section_content_tags = tbl.find_all("font", class_="sectioncontent")
+                    for tag in section_content_tags:
+                        # Extract ALL text including nested subsections
+                        # The regex will parse out the subsections later
+                        tag_text = tag.get_text(separator="\n", strip=False)
+                        if tag_text:
+                            all_text_parts.append(tag_text)
 
-                # If it has content and matches section table attributes, it's a continuation
-                if has_section_content or has_subsection_content:
-                    if (next_table.get("cellpadding") == "0" and
-                        next_table.get("cellspacing") == "4mm" and
-                        next_table.get("align") == "center" and
-                        next_table.get("border") == "0"):
-                        tables_to_process.append(next_table)
-                        next_table = next_table.find_next_sibling("table")
-                        continue
-                break
-
-            # Extract content from all tables (main + continuations)
-            for tbl in tables_to_process:
-                # Get content from sectioncontent tags
-                section_content_tags = tbl.find_all("font", class_="sectioncontent")
-                for tag in section_content_tags:
-                    # Extract ALL text including nested subsections
-                    # The regex will parse out the subsections later
-                    tag_text = tag.get_text(separator="\n", strip=False)
-                    if tag_text:
-                        all_text_parts.append(tag_text)
-
-                # IMPORTANT: ALSO extract subsectioncontent tags (in addition to sectioncontent)
-                # This is needed for amendment laws where (A), (B), (C) clauses are in subsectioncontent
-                # Example: legislation_B_27 section 3 has main text in sectioncontent,
-                # and amendment clauses (A), (B), (C)... in subsectioncontent tags
-                subsection_tags = tbl.find_all("font", class_="subsectioncontent")
-                for tag in subsection_tags:
-                    tag_text = tag.get_text(separator="\n", strip=False)
-                    if tag_text:
-                        all_text_parts.append(tag_text)
+                    # IMPORTANT: ALSO extract subsectioncontent tags (in addition to sectioncontent)
+                    # This is needed for amendment laws where (A), (B), (C) clauses are in subsectioncontent
+                    # Example: legislation_B_27 section 3 has main text in sectioncontent,
+                    # and amendment clauses (A), (B), (C)... in subsectioncontent tags
+                    subsection_tags = tbl.find_all("font", class_="subsectioncontent")
+                    for tag in subsection_tags:
+                        tag_text = tag.get_text(separator="\n", strip=False)
+                        if tag_text:
+                            all_text_parts.append(tag_text)
 
             # If no content tags found, get all text from main table only
             if not all_text_parts:
@@ -1752,8 +1816,9 @@ class MainHTMLProcessor:
 
                 # Weaker indicators: only treat as interpretation if combined with other signals
                 if not is_interpretation_section:
-                    # "In this Act" at the very start (first 200 chars) suggests definitions
-                    if re.search(r'^.{0,200}In\s+this\s+(?:Act|Ordinance|Law)', raw_content, re.I | re.DOTALL):
+                    # "In this Act" ONLY if followed by definition language
+                    # Don't match phrases like "in this Act referred to as" which are just references
+                    if re.search(r'^.{0,200}In\s+this\s+(?:Act|Ordinance|Law),?\s+(?:unless|the\s+following|these)', raw_content, re.I | re.DOTALL):
                         is_interpretation_section = True
                     # "unless the context otherwise requires" ONLY if:
                     # 1. It appears at the very start (within first 150 characters)
@@ -1821,10 +1886,92 @@ class MainHTMLProcessor:
                             full_content = full_content + ' ' + ' '.join(nested_content)
                     
                     final_content = [full_content]
-                
-                # No subsections for definition blocks - everything is in content
+
+                # Try to extract definition entries as subsections for interpretation sections
+                # Pattern: " term " means/includes/etc.
                 subsections = []
-                
+                if full_content:
+                    # Extract definition entries
+                    # Pattern: quoted term followed by means/includes
+                    definition_pattern = re.compile(
+                        r'["\'\s]([a-zA-Z][a-zA-Z\s\-]+?)["\'\s]\s+(means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning)',
+                        re.I
+                    )
+
+                    matches = list(definition_pattern.finditer(full_content))
+
+                    if matches:
+                        # Extract preface (content before first definition)
+                        preface = full_content[:matches[0].start()].strip()
+                        preface = self.clean_text(preface)
+                        if preface:
+                            final_content = [preface]
+                        else:
+                            final_content = []
+
+                        # Extract each definition as a subsection
+                        for i, match in enumerate(matches):
+                            term = match.group(1).strip()
+
+                            # Find the content of this definition
+                            # It starts from the match and goes until the next definition or end
+                            start_pos = match.start()
+                            if i + 1 < len(matches):
+                                end_pos = matches[i + 1].start()
+                            else:
+                                end_pos = len(full_content)
+
+                            definition_content = full_content[start_pos:end_pos].strip()
+
+                            # Extract nested subsections from this definition (e.g., (i), (ii), (a), (b))
+                            # Pattern for nested subsections: (i), (ii), (a), (b), etc.
+                            nested_subsections = []
+                            nested_pattern = re.compile(r'(?:^|\n)\s*(\([a-z0-9ivxlcdm]+\))\s+', re.I | re.M)
+                            nested_matches = list(nested_pattern.finditer(definition_content))
+
+                            if nested_matches:
+                                # Extract preface (content before first nested subsection)
+                                preface = definition_content[:nested_matches[0].start()].strip()
+                                preface = self.clean_text(preface)
+
+                                # Extract each nested subsection
+                                for j, nested_match in enumerate(nested_matches):
+                                    identifier = nested_match.group(1).strip()
+
+                                    # Find content: from this match to next match or end
+                                    nested_start = nested_match.end()
+                                    if j + 1 < len(nested_matches):
+                                        nested_end = nested_matches[j + 1].start()
+                                    else:
+                                        nested_end = len(definition_content)
+
+                                    nested_content = definition_content[nested_start:nested_end].strip()
+                                    nested_content = self.clean_text(nested_content)
+
+                                    if nested_content:
+                                        nested_subsections.append({
+                                            "identifier": identifier,
+                                            "content": nested_content,
+                                            "subsections": []
+                                        })
+
+                                # Add definition with its nested subsections
+                                if preface or nested_subsections:
+                                    subsections.append({
+                                        "identifier": f'"{term}"',
+                                        "content": preface if preface else "",
+                                        "subsections": nested_subsections
+                                    })
+                            else:
+                                # No nested subsections, just clean and add the definition
+                                definition_content = self.clean_text(definition_content)
+                                if definition_content:
+                                    subsections.append({
+                                        "identifier": f'"{term}"',
+                                        "content": definition_content,
+                                        "subsections": []
+                                    })
+
             else:
                 # Normal section processing (non-interpretation)
                 # IMPROVED: Check if section has nested table structure for subsections
@@ -5515,7 +5662,14 @@ class MainHTMLProcessor:
                 if correct_chapter:
                     break
 
+            # Debug section 373
+            if sec_num == 373 and self.debug_mode:
+                print(f"\n[MISPLACEMENT CHECK] Section 373:")
+                print(f"  Current location: part={current_part}, chapter={current_chapter}")
+                print(f"  Correct location: part={correct_part}, chapter={correct_chapter}")
+
             # Check if section is misplaced
+            # Case 1: Section should be in a specific chapter but isn't
             if correct_chapter and current_chapter != correct_chapter:
                 moves.append({
                     'section_num': sec_num,
@@ -5527,6 +5681,22 @@ class MainHTMLProcessor:
                     'group_obj': info['group_obj'],
                     'index': info['index']
                 })
+            # Case 2: Section should be in a different PART (no specific chapter)
+            # This handles cases like section 373 which should be in PART II
+            # but is currently in MAIN PART's default group
+            elif correct_part and not correct_chapter and current_part != correct_part:
+                # Only move if current location is a default group (no chapter)
+                if not current_chapter or current_chapter in [None, 'None', '']:
+                    moves.append({
+                        'section_num': sec_num,
+                        'section': info['section'],
+                        'from_part': current_part,
+                        'from_chapter': current_chapter,
+                        'to_part': correct_part,
+                        'to_chapter': None,  # No specific chapter, goes to part's default group
+                        'group_obj': info['group_obj'],
+                        'index': info['index']
+                    })
 
         if not moves:
             return  # No fixes needed
@@ -5971,15 +6141,41 @@ class MainHTMLProcessor:
             m = re.match(r'^(\d+)', str(section_num_str))
             return int(m.group(1)) if m else None
 
-        def find_correct_container(section_num, containers):
-            """Find which container this section should belong to."""
+        def find_correct_container(section_num, section_num_str, containers):
+            """
+            Find which container this section should belong to.
+            When multiple containers match (e.g., PART IV: 39-42, PART IVA: 42-42):
+            - Alphanumeric sections (42A, 42B) prefer narrow ranges (PART IVA: 42-42)
+            - Plain numeric sections (42) prefer broader ranges (PART IV: 39-42)
+            """
+            # Find all matching containers
+            matching_containers = []
             for container in containers:
                 min_sec = container.get('min')
                 max_sec = container.get('max')
                 if min_sec and max_sec:
                     if min_sec <= section_num <= max_sec:
-                        return container
-            return None
+                        matching_containers.append(container)
+
+            if not matching_containers:
+                return None
+
+            if len(matching_containers) == 1:
+                return matching_containers[0]
+
+            # Multiple matches - apply preference logic
+            has_alpha_suffix = bool(re.match(r'^\d+[A-Za-z]+', str(section_num_str)))
+
+            if has_alpha_suffix:
+                # Prefer narrow range for alphanumeric sections
+                # Sort by range size (ascending), so narrow ranges come first
+                matching_containers.sort(key=lambda c: (c.get('max', 0) - c.get('min', 0)))
+            else:
+                # Prefer broader range for plain numeric sections
+                # Sort by range size (descending), so broader ranges come first
+                matching_containers.sort(key=lambda c: -(c.get('max', 0) - c.get('min', 0)))
+
+            return matching_containers[0]
 
         def find_part_and_chapter(parts, container_number, container_title):
             """Find the part and chapter matching the container."""
@@ -6028,10 +6224,11 @@ class MainHTMLProcessor:
             for chapter_idx, chapter in enumerate(part.get('section_groups', [])):
                 sections = chapter.get('sections', [])
                 for section_idx, section in enumerate(sections[:]):  # Copy to avoid modification during iteration
-                    section_num_int = extract_section_num_int(section.get('number'))
+                    section_num_str = section.get('number')
+                    section_num_int = extract_section_num_int(section_num_str)
                     if section_num_int:
                         # Find which container this section should be in
-                        correct_container = find_correct_container(section_num_int, textual_containers)
+                        correct_container = find_correct_container(section_num_int, section_num_str, textual_containers)
 
                         if correct_container:
                             # Check if section is already in correct container
@@ -7392,6 +7589,24 @@ class MainHTMLProcessor:
                             range_size = target_max - target_min
                             score = 1000 - range_size  # Smaller range = higher score
 
+                            # SPECIAL HANDLING FOR ALPHANUMERIC SECTIONS (e.g., 42A, 42B)
+                            # When parts overlap (e.g., PART IV: 39-42, PART IVA: 42-42):
+                            # - Plain numeric sections (42) should prefer broader range (PART IV)
+                            # - Alphanumeric sections (42A, 42B) should prefer narrow range (PART IVA)
+                            has_alpha_suffix = bool(re.match(r'^\d+[A-Za-z]+', section_number_str))
+                            is_narrow_range = (target_min == target_max)
+
+                            if is_narrow_range and has_alpha_suffix:
+                                # Alphanumeric section + narrow range = boost score
+                                score += 100  # Prefer narrow range for 42A, 42B
+                                if self.debug_mode and section_number_str in ['42A', '42B']:
+                                    print(f"  DEBUG: Section {section_number_str} (alphanumeric) matching narrow range [{target_min}-{target_max}], boosting score to {score}")
+                            elif is_narrow_range and not has_alpha_suffix:
+                                # Plain numeric section + narrow range = reduce score
+                                score -= 100  # Prefer broader range for plain 42
+                                if self.debug_mode and section_number_str in ['42', '42A', '42B']:
+                                    print(f"  DEBUG: Section {section_number_str} (plain numeric) matching narrow range [{target_min}-{target_max}], reducing score to {score}")
+
                             if score > best_score:
                                 best_score = score
                                 best_target = target
@@ -7577,6 +7792,14 @@ class MainHTMLProcessor:
                     sec_nums = [_extract_section_num(s) for s in sections]
                     sec_23_79 = [n for n in sec_nums if n and 23 <= n <= 79]
                     print(f"DEBUG: Adding {len(sections)} sections to PART III, including {len(sec_23_79)} in range 23-79")
+
+                # DEBUG: Check if section 373 is being added
+                if self.debug_mode:
+                    sec_nums = [_extract_section_num(s) for s in sections]
+                    if 373 in sec_nums:
+                        print(f"[PART_DIRECT] Adding section 373 to part '{part_number}' default group")
+                        print(f"  Total sections being added: {len(sections)}")
+                        print(f"  Section numbers: {sec_nums}")
 
                 default_group["sections"].extend(sections)
             
