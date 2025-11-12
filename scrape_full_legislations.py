@@ -5689,48 +5689,26 @@ class MainHTMLProcessor:
                 code_name = "Civil Procedure Code" if doc_id == 'legislation_C_89' else "Code of Criminal Procedure"
                 print(f"  Using specialized reorganization for {code_name} ({len(all_sections)} sections)")
 
-            # For C_89, extract full PART/CHAPTER hierarchy
-            # For C_101, use simpler PART-only extraction
-            if doc_id == 'legislation_C_89':
-                # Extract PART and CHAPTER boundaries
-                parts_with_chapters = self.extract_parts_and_chapters_from_hidden_input(soup)
+            # Both C_89 and C_101 have full PART/CHAPTER hierarchy in hidden input
+            # Extract PART and CHAPTER boundaries
+            parts_with_chapters = self.extract_parts_and_chapters_from_hidden_input(soup)
 
-                if parts_with_chapters:
-                    # Create temporary structure with all sections
-                    temp_parts = [{
-                        'part_number': 'TEMP',
-                        'part_title': None,
-                        'section_groups': [{
-                            'title': None,
-                            'sections': all_sections
-                        }]
+            if parts_with_chapters:
+                # Create temporary structure with all sections
+                temp_parts = [{
+                    'part_number': 'TEMP',
+                    'part_title': None,
+                    'section_groups': [{
+                        'title': None,
+                        'sections': all_sections
                     }]
+                }]
 
-                    # Reorganize with PART > CHAPTER hierarchy
-                    final_parts = self.reorganize_sections_with_chapters(temp_parts, parts_with_chapters)
-                else:
-                    # Fallback to standard routing
-                    final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+                # Reorganize with PART > CHAPTER hierarchy
+                final_parts = self.reorganize_sections_with_chapters(temp_parts, parts_with_chapters)
             else:
-                # For C_101 and others, use simpler PART-only extraction
-                part_boundaries = self.extract_parts_from_hidden_input_c89(soup)
-
-                if part_boundaries:
-                    # Create temporary structure with all sections
-                    temp_parts = [{
-                        'part_number': 'TEMP',
-                        'part_title': None,
-                        'section_groups': [{
-                            'title': None,
-                            'sections': all_sections
-                        }]
-                    }]
-
-                    # Reorganize using simpler PART-only logic
-                    final_parts = self.reorganize_sections_by_part_c89(temp_parts, part_boundaries)
-                else:
-                    # Fallback to standard routing
-                    final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+                # Fallback to standard routing
+                final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
         else:
             final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
 
@@ -10103,7 +10081,36 @@ class MainHTMLProcessor:
                                 'section_count': len(section_numbers)
                             })
 
-            # If we found preliminary chapters, create a MAIN PART for them
+            # Also check for standalone sections BEFORE the first PART (without chapter headers)
+            # This handles cases like C_101 where section 1 appears before PART I
+            if not preliminary_chapters:
+                # Look for sections before the first PART
+                text_before_first_part = hidden_text[:first_part_pos]
+                section_matches_before = list(section_pattern.finditer(text_before_first_part))
+
+                if section_matches_before:
+                    section_numbers_before = [sm.group(1) for sm in section_matches_before]
+                    section_ints_before = []
+
+                    for sec in section_numbers_before:
+                        match = re.match(r'(\d+)', sec)
+                        if match:
+                            section_ints_before.append(int(match.group(1)))
+
+                    if section_ints_before:
+                        # Create a pseudo-chapter for these standalone sections
+                        preliminary_chapters.append({
+                            'chapter_number': None,  # No chapter, just standalone sections
+                            'chapter_title': 'PRELIMINARY',
+                            'section_start': min(section_ints_before),
+                            'section_end': max(section_ints_before),
+                            'section_count': len(section_numbers_before)
+                        })
+
+                        if self.debug_mode:
+                            print(f"  [C89+CHAPTERS] Found {len(section_numbers_before)} standalone sections before PART I: {min(section_ints_before)}-{max(section_ints_before)}")
+
+            # If we found preliminary chapters or standalone sections, create a MAIN PART for them
             if preliminary_chapters:
                 parts.append({
                     'part_number': 'MAIN PART',
@@ -10114,7 +10121,8 @@ class MainHTMLProcessor:
                 if self.debug_mode:
                     print(f"  [C89+CHAPTERS] MAIN PART (PRELIMINARY): {len(preliminary_chapters)} chapters")
                     for ch in preliminary_chapters:
-                        print(f"    {ch['chapter_number']}: {ch.get('chapter_title', 'N/A')} - sections {ch['section_start']}-{ch['section_end']}")
+                        ch_num = ch['chapter_number'] or 'Standalone sections'
+                        print(f"    {ch_num}: {ch.get('chapter_title', 'N/A')} - sections {ch['section_start']}-{ch['section_end']}")
 
         for i, part_match in enumerate(part_matches):
             part_roman = part_match.group(1)
