@@ -94,7 +94,7 @@ class AmendmentProcessor:
                 main_json_file = json_files_dict[folder_name]
                 
                 # Process all HTML files in the amendment directory
-                amendment_files = list(amendment_dir.glob("*.html"))
+                amendment_files = list(amendment_dir.rglob("*.html"))
                 if not amendment_files:
                     print(f"No amendment HTML files found for {folder_name}")
                     continue
@@ -190,35 +190,36 @@ class AmendmentProcessor:
     def extract_sections_with_continuations(self, section_tables):
         """
         Extracts sections with proper handling of continuation sections.
-        
+
         Args:
             section_tables (list): List of BeautifulSoup table elements
-            
+
         Returns:
             list: List of section dictionaries with continuations included
         """
         sections = []
         current_section = None
-        
+
         for idx, table in enumerate(section_tables):
             # Try to extract section number
             section_num = self.extract_section_number(table, idx)
-            
+
             # If this table has a section number, it's a new section
             if section_num:
-                # If we were tracking a previous section, add it to our list
+                # If we were tracking a previous section, finalize it
                 if current_section:
+                    self.finalize_section(current_section)
                     sections.append(current_section)
-                
+
                 # Start a new section
                 current_section = self.extract_single_section(table, idx)
                 current_section["continuation"] = []
-            
+
             # If no section number, but we have a current section, treat as continuation
             elif current_section:
                 continuation_content = self.extract_continuation_content(table)
                 current_section["continuation"].append(continuation_content)
-            
+
             # If no section number and no current section, something's wrong
             # We'll create a placeholder section
             else:
@@ -231,37 +232,103 @@ class AmendmentProcessor:
                 }
                 sections.append(placeholder_section)
                 current_section = None
-        
+
         # Don't forget to add the last section if there is one
         if current_section:
+            self.finalize_section(current_section)
             sections.append(current_section)
-        
+
         return sections
+
+    def finalize_section(self, section):
+        """
+        Finalize a section by processing its continuations.
+        For interpretation/definition sections, promote continuation definitions to subsections.
+
+        Args:
+            section (dict): Section dictionary to finalize
+        """
+        # Check if this is an interpretation section
+        heading = section.get('heading') or ''
+        heading = heading.lower() if heading else ''
+        content = section.get('content') or ''
+        is_interpretation = 'interpretation' in heading or 'definition' in heading
+
+        # Also check content for interpretation indicators
+        if not is_interpretation and content and isinstance(content, str):
+            definition_indicators = [
+                r'unless\s+the\s+context\s+otherwise\s+requires',
+                r'following\s+definitions?\s+shall\s+apply',
+            ]
+            for pattern in definition_indicators:
+                if re.search(pattern, content[:200], re.I):
+                    is_interpretation = True
+                    break
+
+        # If this is an interpretation section and has continuations with definitions,
+        # promote those definitions to be direct subsections
+        if is_interpretation and section.get('continuation'):
+            for cont in section['continuation']:
+                if cont.get('subsections'):
+                    # Add continuation subsections to main section subsections
+                    section['subsections'].extend(cont['subsections'])
+                    # Clear the continuation's subsections since we promoted them
+                    cont['subsections'] = []
+
+            # Remove empty continuations
+            section['continuation'] = [
+                cont for cont in section['continuation']
+                if cont.get('content') or cont.get('subsections')
+            ]
 
     def extract_continuation_content(self, table):
         """
         Extract content from a continuation table.
-        
+
         Args:
             table (BeautifulSoup element): Table containing continuation content
-            
+
         Returns:
             dict: Extracted continuation content
         """
         # Extract heading if present
         heading = self.extract_section_heading(table, 0)
-        
+
         # Extract content
         content_element = table.find('font', class_='sectioncontent')
         content = ""
-        if content_element:
-            content = self.clean_text(content_element.get_text(separator=" ", strip=True))
-        
-        # Extract any subsections
         subsections = []
+
         if content_element:
+            full_content = content_element.get_text(separator=" ", strip=True)
+            content = self.clean_text(full_content)
+
+            # Extract any nested subsections from tables
             subsections = self.extract_nested_subsections(content_element)
-        
+
+            # If no table-based subsections found, check if this looks like a definition
+            # Continuation tables often contain individual definitions
+            if not subsections:
+                # Check if this is a single definition entry (starts with a quoted term)
+                # Updated to handle "with reference to" in addition to "in relation to"
+                definition_match = re.match(r'^["\']([^"\']+)["\'][\s,]*((?:(?:in\s+relation\s+to|with\s+reference\s+to)[^;]*?[,;]?\s*)?(?:means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning))', content, re.I)
+                if definition_match:
+                    term = definition_match.group(1).strip()
+                    definition_content = content
+
+                    # Remove the term and quotes from the content
+                    definition_content = re.sub(r'^["\']' + re.escape(term) + r'["\'][\s,]*', '', definition_content)
+                    definition_content = self.clean_text(definition_content)
+
+                    # This continuation is actually a definition, so return it as a subsection
+                    subsections = [{
+                        "identifier": f'"{term}"',
+                        "content": definition_content,
+                        "subsections": []
+                    }]
+                    # Clear the main content since it's now in subsections
+                    content = ""
+
         return {
             "heading": heading,
             "content": content,
@@ -271,15 +338,21 @@ class AmendmentProcessor:
     def extract_title(self, soup):
         """
         Extract the title from the HTML content.
-        
+
         Args:
             soup (BeautifulSoup): Parsed HTML
-            
+
         Returns:
             str: Extracted title
         """
         title_element = soup.find('font', class_='actname')
-        return self.clean_text(title_element.text) if title_element else "Unknown Title"
+        title = self.clean_text(title_element.text) if title_element else "Unknown Title"
+
+        # Remove section range from title (e.g., "(1 - 91)" or "(1-91)")
+        # Pattern: space + (number + dash + number) at the end
+        title = re.sub(r'\s*\(\s*\d+\s*[-–]\s*\d+\s*\)\s*$', '', title).strip()
+
+        return title
 
     def extract_description(self, soup):
         """
@@ -518,21 +591,21 @@ class AmendmentProcessor:
     def extract_section_content(self, table):
         """
         Extract content and subsections for a section.
-        
+
         Args:
             table (BeautifulSoup element): Table containing section data
-            
+
         Returns:
             tuple: (content text, subsections list)
         """
         content_element = table.find('font', class_='sectioncontent')
-        
+
         if not content_element:
             return "No content available", []
-        
+
         # Get ALL the text first, before any processing
         full_content = content_element.get_text(separator=" ", strip=True)
-        
+
         # Process only the direct text content, not including nested subsections
         direct_content = ""
         for child in content_element.children:
@@ -542,17 +615,207 @@ class AmendmentProcessor:
                 break
             elif child.name != 'table' and not child.find('table'):
                 direct_content += child.get_text(separator=" ", strip=True)
-        
+
         # Clean the text
         direct_content = self.clean_text(direct_content)
-        
+
         # Extract any section numbers at the beginning
         direct_content = re.sub(r'^\d+\.', '', direct_content).strip()
-        
+
+        # Check if this is an interpretation/definitions section
+        is_interpretation_section = self.is_interpretation_section(table, full_content)
+
         # Extract nested subsections recursively
         subsections = self.extract_nested_subsections(content_element)
-        
+
+        # If this is an interpretation section and no table-based subsections found,
+        # try to extract definitions as subsections from the text
+        if is_interpretation_section and not subsections:
+            direct_content, subsections = self.extract_definitions_as_subsections(full_content)
+
         return direct_content, subsections
+
+    def is_interpretation_section(self, table, content):
+        """
+        Check if a section is an interpretation/definitions section.
+
+        Args:
+            table (BeautifulSoup element): Table containing section data
+            content (str): Section content text
+
+        Returns:
+            bool: True if this is an interpretation section
+        """
+        # Check section heading/title
+        heading_element = table.find('font', style="font-size: 12px")
+        if heading_element:
+            heading = self.clean_text(heading_element.text)
+            if heading:
+                heading = heading.lower()
+                if 'interpretation' in heading or 'definition' in heading:
+                    return True
+
+        # Ensure content is a string
+        if not content or not isinstance(content, str):
+            return False
+
+        # Check content for interpretation indicators
+        definition_indicators = [
+            r'unless\s+the\s+context\s+otherwise\s+requires',
+            r'following\s+definitions?\s+shall\s+apply',
+            r'following\s+expressions?\s+shall\s+have',
+            r'words\s+and\s+expressions?\s+shall\s+have',
+            r'In\s+this\s+(?:Chapter|Part|Act|Ordinance)',
+        ]
+
+        for pattern in definition_indicators:
+            if re.search(pattern, content[:500], re.I):
+                return True
+
+        # Check if content contains multiple definition patterns
+        def_pattern = re.compile(r'["\']([a-zA-Z][a-zA-Z\s\-]*?)["\'][\s,]+(?:means|includes|shall\s+mean|shall\s+include)', re.I)
+        matches = def_pattern.findall(content)
+        if len(matches) >= 2:  # If 2+ definitions, treat as definitions section
+            return True
+
+        return False
+
+    def extract_definitions_as_subsections(self, full_content):
+        """
+        Extract definitions from text as subsections.
+
+        Args:
+            full_content (str): Full section content
+
+        Returns:
+            tuple: (preface content, list of subsections)
+        """
+        subsections = []
+
+        # Pattern for definitions: "term" means/includes...
+        # Updated pattern to handle various formats:
+        # - "term" means...
+        # - "term", in relation to..., means...
+        # - "term"with reference to... means/includes... (note: sometimes no space after quote)
+        definition_pattern = re.compile(
+            r'["\']([^"\']+?)["\'][\s,]*((?:(?:in\s+relation\s+to|with\s+reference\s+to)[^;]*?[,;]?\s*)?(?:means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning))',
+            re.I
+        )
+
+        matches = list(definition_pattern.finditer(full_content))
+
+        if not matches:
+            # No definitions found, return content as is
+            return full_content, []
+
+        # Extract preface (content before first definition)
+        preface = full_content[:matches[0].start()].strip()
+        preface = self.clean_text(preface)
+
+        # Extract each definition as a subsection
+        for i, match in enumerate(matches):
+            term = match.group(1).strip()
+
+            # Find the content of this definition
+            # It starts from the match and goes until the next definition or end
+            start_pos = match.start()
+            if i + 1 < len(matches):
+                end_pos = matches[i + 1].start()
+            else:
+                end_pos = len(full_content)
+
+            definition_content = full_content[start_pos:end_pos].strip()
+
+            # Clean the definition content
+            definition_content = self.clean_text(definition_content)
+
+            # Remove the quotes and term from the beginning if present
+            # Keep the full definition including "in relation to" clause
+            definition_content = re.sub(r'^["\']' + re.escape(term) + r'["\'][\s,]*', '', definition_content)
+
+            # Check for nested subsections within the definition (e.g., (a), (b), (i), (ii))
+            nested_subsections = self.extract_nested_subsections_from_text(definition_content)
+
+            # If nested subsections found, extract just the preface
+            if nested_subsections:
+                # Find where the first nested subsection starts
+                # Updated to handle both newline-separated and inline formats
+                first_nested_pattern = re.search(r'(?:^|(?<=[;.\-:])\s+|\n\s*|(?:\band\b\s+))(\([a-z0-9ivxlcdm]+\))\s+', definition_content, re.I)
+                if first_nested_pattern:
+                    definition_content = definition_content[:first_nested_pattern.start()].strip()
+                    # Remove trailing separator if present
+                    definition_content = re.sub(r'[;.]\s*$', '', definition_content).strip()
+                    definition_content = self.clean_text(definition_content)
+
+            subsections.append({
+                "identifier": f'"{term}"',
+                "content": definition_content,
+                "subsections": nested_subsections
+            })
+
+        return preface, subsections
+
+    def extract_nested_subsections_from_text(self, text):
+        """
+        Extract nested subsections from plain text (e.g., (a), (b), (i), (ii)).
+
+        Args:
+            text (str): Text content to parse
+
+        Returns:
+            list: List of nested subsection dictionaries
+        """
+        if not text:
+            return []
+
+        nested_subsections = []
+
+        # Pattern for nested subsections: (a), (b), (i), (ii), (1), (2), etc.
+        # Updated to handle both newline-separated and inline (semicolon-separated) formats
+        # Match after: start, newline, after semicolon/period/dash/colon+space, or after "and"
+        nested_pattern = re.compile(r'(?:^|(?<=[;.\-:])\s+|\n\s*|(?:\band\b\s+))(\([a-z0-9ivxlcdm]+\))\s+', re.I | re.M)
+        nested_matches = list(nested_pattern.finditer(text))
+
+        # Use a set to track identifiers we've already added (to avoid duplicates)
+        seen_identifiers = set()
+
+        for j, match in enumerate(nested_matches):
+            identifier = match.group(1).strip()
+
+            # Skip if we've already processed this identifier
+            if identifier in seen_identifiers:
+                continue
+            seen_identifiers.add(identifier)
+
+            # Find content: from after the identifier to before the next identifier or end
+            nested_start = match.end()
+            if j + 1 < len(nested_matches):
+                # Find the next UNIQUE identifier
+                next_match_idx = j + 1
+                while next_match_idx < len(nested_matches):
+                    next_identifier = nested_matches[next_match_idx].group(1).strip()
+                    if next_identifier not in seen_identifiers:
+                        nested_end = nested_matches[next_match_idx].start()
+                        break
+                    next_match_idx += 1
+                else:
+                    nested_end = len(text)
+            else:
+                nested_end = len(text)
+
+            content = text[nested_start:nested_end].strip()
+            # Remove trailing separators
+            content = re.sub(r'[;.]\s*$', '', content).strip()
+            content = self.clean_text(content)
+
+            if content:
+                nested_subsections.append({
+                    "identifier": identifier,
+                    "content": content,
+                    "subsections": []
+                })
+
+        return nested_subsections
 
     def extract_nested_subsections(self, parent_element, max_depth=10, current_depth=0):
         """

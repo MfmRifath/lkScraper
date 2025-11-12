@@ -138,9 +138,9 @@ def main():
     }
     
     # Define paths - Update these as needed for your specific legislation folder
-    json_file_path = "data/json/legislation_A.json"
-    html_folder = "data/html/legislation_test"
-    data_folder = "data/legislations/legislation_test"
+    json_file_path = "data/json/legislation_C.json"
+    html_folder = "data/html/legislation_C"
+    data_folder = "data/legislations/legislation_C"
     
     print("Pipeline Configuration:")
     print(f"  JSON file: {json_file_path}")
@@ -162,18 +162,18 @@ def main():
         "constitution_2022.png",
         "close.gif"
     ]
-    # Step 1: Scrape initial HTML files
-    # print("Step 1: Scraping initial HTML files...")
-    # try:
-    #     scraper = MainHTMLScraper(headers=headers, cookies=cookies, skip_images=skip_list)
-    #     scraper.process_json_file(json_file_path)
-    #     print("✓ Step 1 completed successfully")
-    # except Exception as e:
-    #     print(f"✗ Step 1 failed: {e}")
-    #     return False
-    # print()
+    #Step 1: Scrape initial HTML files
+    print("Step 1: Scraping initial HTML files...")
+    try:
+        scraper = MainHTMLScraper(headers=headers, cookies=cookies, skip_images=skip_list)
+        scraper.process_json_file(json_file_path)
+        print("✓ Step 1 completed successfully")
+    except Exception as e:
+        print(f"✗ Step 1 failed: {e}")
+        return False
+    print()
     
-    # Step 2: Process the HTML files into structured JSON
+    #Step 2: Process the HTML files into structured JSON
     print("Step 2: Processing HTML files into structured JSON...")
     try:
         main_page_processor = MainHTMLProcessor(html_folder, data_folder)
@@ -232,30 +232,30 @@ def main():
     print()
 
     # Step 7: Convert schedule HTML files to PDF using Playwright
-    # print("Step 7: Converting schedule HTML files to PDF with Playwright...")
-    # try:
-    #     pdf_processor = SchedulePDFProcessor(html_folder, data_folder)
-    #     pdf_processor.debug_mode = True
+    print("Step 7: Converting schedule HTML files to PDF with Playwright...")
+    try:
+        pdf_processor = SchedulePDFProcessor(html_folder, data_folder)
+        pdf_processor.debug_mode = True
         
-    #     print("   Starting Playwright PDF conversion...")
-    #     processed_count, total_pdfs = pdf_processor.process_legislation_folders()
+        print("   Starting Playwright PDF conversion...")
+        processed_count, total_pdfs = pdf_processor.process_legislation_folders()
         
-    #     if total_pdfs > 0:
-    #         print("   Updating JSON files with PDF references...")
-    #         pdf_processor.update_json_with_pdf_references()
+        if total_pdfs > 0:
+            print("   Updating JSON files with PDF references...")
+            pdf_processor.update_json_with_pdf_references()
             
-    #         print(f"✓ Step 7 completed successfully")
-    #         print(f"  - Processed {processed_count} legislation folders")
-    #         print(f"  - Created {total_pdfs} PDF files using Playwright")
-    #     else:
-    #         print("⚠️  No PDF files were created. Check if schedule HTML files exist.")
+            print(f"✓ Step 7 completed successfully")
+            print(f"  - Processed {processed_count} legislation folders")
+            print(f"  - Created {total_pdfs} PDF files using Playwright")
+        else:
+            print("⚠️  No PDF files were created. Check if schedule HTML files exist.")
             
-    # except Exception as e:
-    #     print(f"✗ Step 7 failed: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     return False
-    # print()
+    except Exception as e:
+        print(f"✗ Step 7 failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    print()
     
     print("=" * 60)
     print("ALL STEPS COMPLETED SUCCESSFULLY!")
@@ -264,16 +264,18 @@ def main():
     print("Summary of what was processed:")
     print(f"  📁 HTML source folder: {html_folder}")
     print(f"  📁 JSON output folder: {data_folder}")
-    print(f"  📄 Schedule PDFs created: {total_pdfs} files")
-    print(f"  🔧 PDF Generator: Playwright (modern browser-based)")
+    # Uncomment when Step 7 is enabled:
+    # print(f"  📄 Schedule PDFs created: {total_pdfs} files")
+    # print(f"  🔧 PDF Generator: Playwright (modern browser-based)")
     print()
     print("Your legislation data now contains:")
     print("  ✅ Complete section structure with subsections")
     print("  ✅ Amendment data integrated")
-    print("  ✅ Schedule data converted to high-quality PDF format")
-    print("  ✅ JSON files reference PDF locations")
-    print("  ✅ Modern, maintainable PDF generation system")
-    
+    # Uncomment when Step 7 is enabled:
+    # print("  ✅ Schedule data converted to high-quality PDF format")
+    # print("  ✅ JSON files reference PDF locations")
+    # print("  ✅ Modern, maintainable PDF generation system")
+
     return True
 
 def process_specific_legislation_playwright(legislation_folder_name):

@@ -699,9 +699,62 @@ class MainHTMLProcessor:
         """Extract title and description from the soup."""
         title = soup.find("font", class_="actname").text.strip() if soup.find("font", class_="actname") else "N/A"
         title = self.clean_text(title)
+
+        # Remove section range from title (e.g., "(1 - 91)" or "(1-91)")
+        # Pattern: space + (number + dash + number) at the end
+        import re
+        title = re.sub(r'\s*\(\s*\d+\s*[-–]\s*\d+\s*\)\s*$', '', title).strip()
+
         description_div = soup.find("div", align="justify")
         description = description_div.text.strip() if description_div else "N/A"
         return title, description
+
+    def extract_repeal_info(self, soup):
+        """
+        Extract repeal information if the legislation has been repealed.
+        Returns dict with repeal details or None if not repealed.
+        """
+        import re
+
+        # Look for repeal notice in red font
+        # Pattern: <font color="red">Repealed By...</font>
+        red_fonts = soup.find_all("font", color="red")
+
+        for font_tag in red_fonts:
+            text = font_tag.get_text(strip=True)
+            # Check if this contains repeal information
+            if re.search(r'Repealed\s+By', text, re.I):
+                # Extract the repealing act information
+                # Example: "Repealed By The Ayurveda Act, No. 31 of 1961"
+                repeal_text = self.clean_text(text)
+
+                # Try to parse out the act name and number
+                # Pattern: "Repealed By [Act Name], No. [Number] of [Year]"
+                match = re.search(r'Repealed\s+By\s+(.+?),?\s*No\.\s*(\d+)\s+of\s+(\d+)', repeal_text, re.I)
+
+                if match:
+                    act_name = match.group(1).strip()
+                    act_number = match.group(2).strip()
+                    year = match.group(3).strip()
+
+                    return {
+                        "repealed": True,
+                        "repeal_text": repeal_text,
+                        "repealing_act": {
+                            "name": act_name,
+                            "number": act_number,
+                            "year": year
+                        }
+                    }
+                else:
+                    # Couldn't parse structured info, just return the text
+                    return {
+                        "repealed": True,
+                        "repeal_text": repeal_text
+                    }
+
+        # Not repealed
+        return None
 
     def extract_preamble(self, soup):
         """Extracts all preamble texts from the soup object and cleans them."""
@@ -957,6 +1010,10 @@ class MainHTMLProcessor:
             if not subsection_content:
                 continue
 
+            # IMPORTANT: Extract amendment from marginal notes in this subsection table
+            # Amendments are in <tr class="morginalnotes"> within the left column
+            subsection_amendment = self.extract_amendment_info(table)
+
             # Recursively parse nested <table>-based subsections under this block
             nested_subsections = self.extract_nested_subsections(subsection_content)
 
@@ -988,11 +1045,17 @@ class MainHTMLProcessor:
 
             # Only append if we have meaningful content or nested subsections
             if content or nested_subsections:
-                subsections.append({
+                subsection_obj = {
                     "identifier": identifier,
                     "content": content,
                     "subsections": nested_subsections
-                })
+                }
+
+                # Add amendment if present
+                if subsection_amendment:
+                    subsection_obj["amendment"] = subsection_amendment
+
+                subsections.append(subsection_obj)
 
         return subsections
     def _extract_num_alpha(self, num_str: str):
@@ -1701,6 +1764,12 @@ class MainHTMLProcessor:
             # Collect tables to process: main table + any continuation tables (always needed for later checks)
             tables_to_process = [table]
 
+            # IMPORTANT: Detect interpretation sections BEFORE continuation check
+            # This is needed so we know whether to treat amendment markers as new sections
+            is_interpretation_section = False
+            if title and 'interpretation' in title.lower():
+                is_interpretation_section = True
+
             # Skip content extraction if amendment/content mismatch detected
             if not skip_content_extraction:
 
@@ -1717,10 +1786,14 @@ class MainHTMLProcessor:
                     if has_section_link:
                         break
 
-                    # Check if it has an amendment marker - this also indicates a new section
-                    # Example: Section 7 "Repealed" has amendment [6, 4 of 1991] but no section link
+                    # Check if it has an amendment marker
+                    # IMPORTANT: For interpretation sections, amendments can appear within definitions
+                    # and should NOT be treated as new sections. Only treat amendment markers as
+                    # new sections if this is NOT an interpretation section.
                     has_amendment = next_table.find("a", href=lambda href: href and "openSectionOrdinanceWindow" in href)
-                    if has_amendment:
+                    if has_amendment and not is_interpretation_section:
+                        # Only treat amendment marker as new section for non-interpretation sections
+                        # Example: Section 7 "Repealed" has amendment [6, 4 of 1991] but no section link
                         if self.debug_mode:
                             print(f"  [CONTINUATION CHECK] Next table has amendment marker - treating as new section, not continuation")
                         break
@@ -1739,6 +1812,10 @@ class MainHTMLProcessor:
                             next_table = next_table.find_next_sibling("table")
                             continue
                     break
+
+                # IMPORTANT: For interpretation sections, we'll process continuation tables separately
+                # to preserve amendment-to-definition mapping. Don't collect amendments here.
+                # Each definition will get its own amendment from its continuation table.
 
                 # Extract content from all tables (main + continuations)
                 for tbl in tables_to_process:
@@ -1788,15 +1865,13 @@ class MainHTMLProcessor:
             if title:
                 # Remove title if it appears at the start
                 raw_content = raw_content.replace(title, '', 1).strip()
-            
-            # Check if this is an interpretation/definitions section
-            is_interpretation_section = False
-            if title and 'interpretation' in title.lower():
-                is_interpretation_section = True
+
+            # NOTE: is_interpretation_section was already detected earlier (before continuation check)
+            # Now check for additional definition patterns in content if not already identified
             # NOTE: Don't hardcode section numbers as interpretation sections
             # Section 2 varies by legislation - only check title and content patterns
-            
-            # Check for definition patterns in content
+
+            # Check for definition patterns in content (only if not already identified by title)
             if not is_interpretation_section:
                 # IMPROVED: Be more restrictive about interpretation section detection
                 # Only treat as interpretation if it has STRONG indicators, not just
@@ -1837,64 +1912,116 @@ class MainHTMLProcessor:
             subsections = []
             
             if is_interpretation_section:
-                # FIXED: For interpretation sections, capture EVERYTHING including after hyphens
-                # Don't stop at the hyphen - the definitions come after it!
-                
-                # Clean the content but keep EVERYTHING
-                # Remove excessive whitespace but preserve the structure
-                full_content = raw_content
-                
-                # Clean up whitespace
-                full_content = re.sub(r'\n{3,}', '\n\n', full_content)
-                full_content = re.sub(r'[ \t]+', ' ', full_content)
-                
-                # Remove amendment references
-                full_content = AMEND_RX.sub('', full_content)
-                
-                # Fix common issues but preserve all content
-                full_content = full_content.replace('\xa0', ' ')
-                
-                # Important: Don't truncate at hyphens or any punctuation
-                # The definitions come after "unless the context otherwise requires-"
-                
-                # Clean but preserve ALL content as one block
-                full_content = full_content.strip()
-                
-                if full_content:
-                    # Check if content ends with just the hyphen and nothing after
-                    # This means we need to look harder for the definitions
-                    if full_content.endswith('requires-') or full_content.endswith('requires -'):
-                        # Try to get more content from nested tables or other elements
-                        nested_content = []
-                        
-                        # Look for nested tables with definitions
-                        for nested_table in table.find_all('table'):
-                            nested_text = nested_table.get_text(separator=' ', strip=True)
-                            if nested_text and nested_text not in full_content:
-                                nested_content.append(nested_text)
-                        
-                        # Look for definition patterns in any text nodes
-                        for elem in table.descendants:
-                            if isinstance(elem, NavigableString):
-                                elem_text = str(elem).strip()
-                                # Check if this looks like a definition
-                                if elem_text and ('"' in elem_text or 'means' in elem_text or 'includes' in elem_text):
-                                    if elem_text not in full_content:
-                                        nested_content.append(elem_text)
-                        
-                        if nested_content:
-                            full_content = full_content + ' ' + ' '.join(nested_content)
-                    
-                    final_content = [full_content]
+                # IMPORTANT: For interpretation sections, process each table separately to preserve
+                # the one-to-one mapping between definitions and their amendments
 
-                # Try to extract definition entries as subsections for interpretation sections
-                # Pattern: " term " means/includes/etc.
+                # Extract preface from main table (first table)
+                main_table_text = tables_to_process[0].get_text(separator='\n', strip=False) if tables_to_process else ''
+                main_table_text = self.clean_text(main_table_text)
+
+                # Remove section number and title
+                if section_number:
+                    main_table_text = re.sub(rf'^\s*{re.escape(section_number)}\s*\.\s*', '', main_table_text, count=1, flags=re.MULTILINE)
+                if title:
+                    main_table_text = main_table_text.replace(title, '', 1).strip()
+
+                # Extract preface (text before first definition in main table)
+                # Pattern matches both ASCII quotes ("') and Unicode curly quotes ("")
+                definition_pattern = re.compile(
+                    r'["\'\u201c\u201d]([^"\'\u201c\u201d]+?)["\'\u201c\u201d][\s,]*((?:(?:in\s+relation\s+to|with\s+reference\s+to)[^;]*?[,;]?\s*)?(?:means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning))',
+                    re.I
+                )
+
+                first_def_match = definition_pattern.search(main_table_text)
+                if first_def_match:
+                    preface = main_table_text[:first_def_match.start()].strip()
+                    final_content = [self.clean_text(preface)] if preface else []
+                else:
+                    final_content = [main_table_text] if main_table_text else []
+
+                # Process each table to extract ONE definition + its amendment
                 subsections = []
+                for tbl in tables_to_process:
+                    tbl_text = tbl.get_text(separator='\n', strip=False)
+                    tbl_text = self.clean_text(tbl_text)
+
+                    # Remove amendment markers from the text
+                    tbl_text = AMEND_RX.sub('', tbl_text)
+
+                    # Find definition in this table
+                    tbl_match = definition_pattern.search(tbl_text)
+
+                    # IMPORTANT: Also check for definitions with just a hyphen/dash (no immediate "means/includes")
+                    # Example: "Chairman" - with nested subsections containing "means"
+                    if not tbl_match:
+                        hyphen_pattern = re.compile(
+                            r'["\'\u201c\u201d]([^"\'\u201c\u201d]+?)["\'\u201c\u201d]\s*[-–—]\s*',
+                            re.I
+                        )
+                        tbl_match = hyphen_pattern.search(tbl_text)
+
+                    if tbl_match:
+                        term = tbl_match.group(1).strip()
+
+                        # Extract ONLY this definition's content (not other definitions that might follow)
+                        # Find next definition or end of text
+                        def_start = tbl_match.start()
+                        def_end = len(tbl_text)
+
+                        # Look for the next definition
+                        next_match = definition_pattern.search(tbl_text, tbl_match.end())
+                        if next_match:
+                            def_end = next_match.start()
+
+                        definition_content = tbl_text[def_start:def_end].strip()
+
+                        # Extract the opening quote character to preserve it in the identifier
+                        opening_quote_match = re.search(r'(["\'\u201c\u201d])' + re.escape(term), tbl_text)
+                        opening_quote = opening_quote_match.group(1) if opening_quote_match else '"'
+
+                        # Determine closing quote (match opening or use default)
+                        quote_pairs = {'"': '"', "'": "'", '\u201c': '\u201d', '\u201d': '\u201c'}
+                        closing_quote = quote_pairs.get(opening_quote, '"')
+
+                        # Remove the term and quotes from the beginning
+                        definition_content = re.sub(r'^["\'\u201c\u201d]' + re.escape(term) + r'["\'\u201c\u201d][\s,]*', '', definition_content)
+
+                        # Extract amendment from this table
+                        tbl_amendment = self.extract_amendment_info(tbl)
+
+                        # IMPORTANT: Extract nested subsections from this table
+                        # Example: "Chairman" - has nested (a), (b) subsections
+                        # Look for sectioncontent font element
+                        section_content_font = tbl.find('font', class_='sectioncontent')
+                        nested_subsections = []
+                        if section_content_font:
+                            nested_subsections = self.extract_nested_subsections(section_content_font)
+
+                        # Create subsection with preserved quote style
+                        subsection_obj = {
+                            "identifier": f'{opening_quote}{term}{closing_quote}',
+                            "content": definition_content,
+                            "subsections": nested_subsections
+                        }
+
+                        # Attach amendment if present
+                        if tbl_amendment:
+                            subsection_obj["amendment"] = tbl_amendment
+
+                        subsections.append(subsection_obj)
+
+                # Skip the full_content extraction logic - we've already processed everything
+                full_content = None
+
                 if full_content:
                     # Extract definition entries
                     # Pattern: quoted term followed by means/includes
+                    # Updated to handle various formats:
+                    # - "term" means...
+                    # - "term", in relation to..., means...
+                    # - "term"with reference to... means/includes... (note: sometimes no space after quote)
                     definition_pattern = re.compile(
-                        r'["\'\s]([a-zA-Z][a-zA-Z\s\-]+?)["\'\s]\s+(means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning)',
+                        r'["\']([^"\']+?)["\'][\s,]*((?:(?:in\s+relation\s+to|with\s+reference\s+to)[^;]*?[,;]?\s*)?(?:means|includes|shall\s+mean|shall\s+include|has\s+the\s+same\s+meaning))',
                         re.I
                     )
 
@@ -1923,29 +2050,63 @@ class MainHTMLProcessor:
 
                             definition_content = full_content[start_pos:end_pos].strip()
 
+                            # Clean the definition content
+                            definition_content = self.clean_text(definition_content)
+
+                            # Remove the quotes and term from the beginning if present
+                            # This handles cases like: "commencement", in relation to this Act, means...
+                            # We want to keep only: in relation to this Act, means...
+                            definition_content = re.sub(r'^["\']' + re.escape(term) + r'["\'][\s,]*', '', definition_content)
+
                             # Extract nested subsections from this definition (e.g., (i), (ii), (a), (b))
                             # Pattern for nested subsections: (i), (ii), (a), (b), etc.
+                            # Updated to handle both newline-separated and inline (space/semicolon-separated) formats
                             nested_subsections = []
-                            nested_pattern = re.compile(r'(?:^|\n)\s*(\([a-z0-9ivxlcdm]+\))\s+', re.I | re.M)
+                            # Pattern matches: start of string, after newline, after semicolon/period/dash+space, or after "and"
+                            nested_pattern = re.compile(r'(?:^|(?<=[;.\-:])\s+|\n\s*|(?:\band\b\s+))(\([a-z0-9ivxlcdm]+\))\s+', re.I | re.M)
                             nested_matches = list(nested_pattern.finditer(definition_content))
 
                             if nested_matches:
                                 # Extract preface (content before first nested subsection)
-                                preface = definition_content[:nested_matches[0].start()].strip()
-                                preface = self.clean_text(preface)
+                                # Find the actual start of the first identifier (before the match start which includes the separator)
+                                first_identifier_pos = nested_matches[0].start()
+                                # Look back to find where the separator starts
+                                preface_text = definition_content[:first_identifier_pos]
+                                # Remove trailing separator if present
+                                preface_text = re.sub(r'[;.]\s*$', '', preface_text).strip()
+                                preface = self.clean_text(preface_text)
 
                                 # Extract each nested subsection
+                                # Use a set to track identifiers we've already added (to avoid duplicates)
+                                seen_identifiers = set()
+
                                 for j, nested_match in enumerate(nested_matches):
                                     identifier = nested_match.group(1).strip()
 
-                                    # Find content: from this match to next match or end
+                                    # Skip if we've already processed this identifier
+                                    if identifier in seen_identifiers:
+                                        continue
+                                    seen_identifiers.add(identifier)
+
+                                    # Find content: from after the identifier to before the next identifier or end
                                     nested_start = nested_match.end()
                                     if j + 1 < len(nested_matches):
-                                        nested_end = nested_matches[j + 1].start()
+                                        # Find the next UNIQUE identifier
+                                        next_match_idx = j + 1
+                                        while next_match_idx < len(nested_matches):
+                                            next_identifier = nested_matches[next_match_idx].group(1).strip()
+                                            if next_identifier not in seen_identifiers:
+                                                nested_end = nested_matches[next_match_idx].start()
+                                                break
+                                            next_match_idx += 1
+                                        else:
+                                            nested_end = len(definition_content)
                                     else:
                                         nested_end = len(definition_content)
 
                                     nested_content = definition_content[nested_start:nested_end].strip()
+                                    # Remove trailing separators
+                                    nested_content = re.sub(r'[;.]\s*$', '', nested_content).strip()
                                     nested_content = self.clean_text(nested_content)
 
                                     if nested_content:
@@ -1957,20 +2118,27 @@ class MainHTMLProcessor:
 
                                 # Add definition with its nested subsections
                                 if preface or nested_subsections:
-                                    subsections.append({
+                                    subsection_obj = {
                                         "identifier": f'"{term}"',
                                         "content": preface if preface else "",
                                         "subsections": nested_subsections
-                                    })
+                                    }
+                                    # Attach amendment if this definition has one
+                                    if term in definition_amendments_map:
+                                        subsection_obj["amendment"] = definition_amendments_map[term]
+                                    subsections.append(subsection_obj)
                             else:
-                                # No nested subsections, just clean and add the definition
-                                definition_content = self.clean_text(definition_content)
+                                # No nested subsections, just add the definition (already cleaned above)
                                 if definition_content:
-                                    subsections.append({
+                                    subsection_obj = {
                                         "identifier": f'"{term}"',
                                         "content": definition_content,
                                         "subsections": []
-                                    })
+                                    }
+                                    # Attach amendment if this definition has one
+                                    if term in definition_amendments_map:
+                                        subsection_obj["amendment"] = definition_amendments_map[term]
+                                    subsections.append(subsection_obj)
 
             else:
                 # Normal section processing (non-interpretation)
@@ -2011,6 +2179,9 @@ class MainHTMLProcessor:
                                 for sibling_tbl in sibling_tables:
                                     subsection_font = sibling_tbl.find('font', class_='subsectioncontent')
                                     if subsection_font:
+                                        # IMPORTANT: Extract amendment from this subsection table
+                                        sibling_amendment = self.extract_amendment_info(sibling_tbl)
+
                                         # Extract this subsection
                                         direct_text_parts = []
                                         for child in subsection_font.children:
@@ -2032,11 +2203,17 @@ class MainHTMLProcessor:
                                             content = direct_text
 
                                         if content:
-                                            subsections.append({
+                                            subsection_obj = {
                                                 "identifier": identifier,
                                                 "content": content,
                                                 "subsections": []
-                                            })
+                                            }
+
+                                            # Add amendment if present
+                                            if sibling_amendment:
+                                                subsection_obj["amendment"] = sibling_amendment
+
+                                            subsections.append(subsection_obj)
 
                     # Extract preface (content before first subsection table)
                     preface_text = []
@@ -2272,8 +2449,15 @@ class MainHTMLProcessor:
         base_link = "https://www.lawlanka.com/lal_v2/pages/popUp/actPopUp.jsp?actId="
 
         # Search within the specific table/element passed, not the entire document
-        target_td_elements = table_or_soup.find_all("td", attrs={"valign": "top", "width": "100px"})
+        # Look for td elements that contain marginal notes
+        # Section-level amendments use width="100px", subsection amendments use width="16%"
+        target_td_elements = table_or_soup.find_all("td", attrs={"valign": "top"})
         for td in target_td_elements:
+            # Check if this td has the right width (100px for sections, 16% for subsections)
+            width = td.get("width")
+            if width not in ["100px", "16%"]:
+                continue
+
             for row in td.find_all("tr", class_="morginalnotes"):
                 text = self.clean_text(row.get_text(" ", strip=True))
                 href = None
@@ -2314,8 +2498,12 @@ class MainHTMLProcessor:
         # 1) Primary - find PART headers
         part_headers = soup.find_all("font", class_="sectionpart")
 
-        # 2) Fallback: find PART lines in *text*
-        if not part_headers:
+        # 2) ALWAYS run fallback: find PART lines in *text* (merge with primary results)
+        # This is needed because some legislations have PART headers as plain text,
+        # not wrapped in <font class="sectionpart"> (e.g., Civil Procedure Code)
+        fallback_headers = []
+        if True:  # Always run fallback, merge results later
+            # Pattern 1: PART at start of line (original pattern)
             RX_PART_LINE = re.compile(
                 r'^\s*PART\s*\.?\s*'
                 r'(?:\(|\[)?'
@@ -2325,17 +2513,42 @@ class MainHTMLProcessor:
                 re.IGNORECASE | re.MULTILINE
             )
 
+            # Pattern 2: Standalone PART line (for embedded PART headers)
+            # Matches PART [ROMAN] as complete line or standalone text
+            RX_PART_STANDALONE = re.compile(
+                r'^\s*PART\s+([IVXLCDM]+)\s*$',
+                re.IGNORECASE | re.MULTILINE
+            )
+
+            # CRITICAL: Check hidden input field (some legislations store full text there)
+            # Example: Civil Procedure Code has PART headers in <input name="selectedhtml">
+            hidden_input = soup.find('input', attrs={'name': 'selectedhtml', 'type': 'hidden'})
+            if hidden_input:
+                hidden_value = hidden_input.get('value', '')
+                if hidden_value and 'PART' in hidden_value:
+                    # Extract PART headers from hidden input
+                    for line in hidden_value.splitlines():
+                        line_stripped = line.strip()
+                        if RX_PART_STANDALONE.match(line_stripped):
+                            # Create a pseudo text node for this PART header
+                            # We need to find the actual location in the DOM
+                            # For now, just track that we found it
+                            if self.debug_mode:
+                                print(f"  Found PART header in hidden input: {line_stripped}")
+
             candidates = []
             for s in soup.find_all(string=True):
                 txt = str(s)
                 if not txt or txt.isspace():
                     continue
+                # Try both patterns
                 for line in txt.splitlines():
-                    if RX_PART_LINE.match(line):
+                    line_stripped = line.strip()
+                    if RX_PART_LINE.match(line) or RX_PART_STANDALONE.match(line_stripped):
                         candidates.append(s)
                         break
 
-            part_headers = []
+            fallback_headers = []
             seen = set()
             for s in candidates:
                 node = getattr(s, "parent", None)
@@ -2347,6 +2560,18 @@ class MainHTMLProcessor:
                 if key in seen:
                     continue
                 seen.add(key)
+                fallback_headers.append(hdr)
+
+        # 3) Merge primary and fallback headers, removing duplicates
+        all_part_headers = list(part_headers) + fallback_headers
+        # Deduplicate by table parent
+        seen_tables = set()
+        part_headers = []
+        for hdr in all_part_headers:
+            tbl = hdr.find_parent("table") if hasattr(hdr, "find_parent") else None
+            key = id(tbl) if tbl else id(hdr)
+            if key not in seen_tables:
+                seen_tables.add(key)
                 part_headers.append(hdr)
 
         if self.debug_mode:
@@ -2498,15 +2723,40 @@ class MainHTMLProcessor:
         # Collect items (headers + section tables) in slice
         items = []
         section_table_count = 0
+        sections_seen_before_header = 0  # Track sections before any header
 
         for tb in all_tables[:end_index]:
-            # header fonts commonly used on these pages
-            for h in tb.find_all("font", class_=("sectiontitle", "sectionsubtitle", "sectionparttitle")):
-                items.append(("header", tb, h))
-
-            if self.is_section_table(tb):
+            # First check if this is a section table
+            is_section = self.is_section_table(tb)
+            if is_section:
                 section_table_count += 1
+                sections_seen_before_header += 1
                 items.append(("section", tb, None))
+
+            # Then check for headers
+            # IMPORTANT: Only recognize headers from proper heading tables (cellspacing="2mm")
+            # AND only after we've seen at least one section table (to avoid navigation/TOC)
+            for h in tb.find_all("font", class_=("sectiontitle", "sectionsubtitle", "sectionparttitle")):
+                # Check if this is a proper heading table, not a navigation table
+                # Proper heading tables have cellspacing="2mm" or similar
+                cellspacing = tb.get("cellspacing", "")
+                # Accept tables with cellspacing of 2mm, 3mm, 4mm, etc. (heading tables)
+                # Reject tables with no cellspacing or large widths (navigation tables)
+                is_proper_heading_table = cellspacing and ("mm" in cellspacing or cellspacing in ["2", "3", "4"])
+
+                # CRITICAL: Also require that we've seen at least one section before this header
+                # This prevents navigation/TOC chapter headings from being recognized
+                has_sections_before = sections_seen_before_header > 0
+
+                if self.debug_mode:
+                    header_text = h.get_text()[:50]
+                    if 'CHAPTER' in header_text:
+                        print(f"  [DEBUG] Chapter header: '{header_text}' - cellspacing='{cellspacing}' - proper_table={is_proper_heading_table} - sections_before={sections_seen_before_header} - will_add={is_proper_heading_table and has_sections_before}")
+
+                if is_proper_heading_table and has_sections_before:
+                    items.append(("header", tb, h))
+                    # Reset counter after adding header
+                    sections_seen_before_header = 0
 
         if self.debug_mode:
             print(f"  Total section tables in MAIN PART: {section_table_count}")
@@ -3049,9 +3299,29 @@ class MainHTMLProcessor:
             element.get("align") == "center" and
             element.get("border") == "0"):
 
+            # IMPORTANT: Tables with these attributes could be:
+            # 1. Actual section tables (have section link or section number)
+            # 2. Continuation tables for interpretation sections (only have amendments)
+            # Only treat as section table if it has a section link OR starts with a section number
+
+            # Check if table has a section link
+            if len(section_links) == 1:
+                if self.debug_mode and contains_service_sections:
+                    print(f"*** SERVICE TABLE MATCHED STANDARD ATTRIBUTES + SECTION LINK ***")
+                return True
+
+            # Check if table starts with a section number pattern (e.g., "89.", "12A.", etc.)
+            # This is for sections that might not have section links but are clearly new sections
+            if re.search(r'^\s*\d+[A-Za-z\-]*\s*\.', table_text):
+                if self.debug_mode and contains_service_sections:
+                    print(f"*** SERVICE TABLE MATCHED STANDARD ATTRIBUTES + SECTION NUMBER ***")
+                return True
+
+            # If it has standard attributes but no section link and no section number,
+            # it's likely a continuation table (e.g., definitions in interpretation sections)
             if self.debug_mode and contains_service_sections:
-                print(f"*** SERVICE TABLE MATCHED STANDARD ATTRIBUTES ***")
-            return True
+                print(f"*** TABLE HAS STANDARD ATTRIBUTES BUT NO SECTION LINK/NUMBER - LIKELY CONTINUATION TABLE ***")
+            return False
 
         # Repealed blocks with marginal notes often lack exact attrs
         if "Repealed" in table_text and element.find_all("tr", class_="morginalnotes"):
@@ -3430,10 +3700,48 @@ class MainHTMLProcessor:
 
             sections_in_range = [num for pos, num in all_sections if start_pos <= pos < next_pos]
 
-            # IMPORTANT: Exclude Section 1 from PART/CHAPTER ranges
-            # Section 1 (Short title) should ONLY belong to MAIN PART, never to textual containers
-            # This prevents section 1 from being incorrectly assigned to PART VI or other parts
-            sections_in_range = [n for n in sections_in_range if n != 1]
+            # IMPORTANT: Handle Section 1 (Short title) carefully
+            # Section 1 should be excluded from numbered PARTS (PART II, PART VI, etc.)
+            # but CAN be included in the first CHAPTER if:
+            # 1. It's a CHAPTER (not a PART), AND
+            # 2. It's the first CHAPTER in the document (i==0 or previous item is not a CHAPTER), AND
+            # 3. Section 1 appears in the text after this chapter's position
+            #
+            # This handles two cases:
+            # - legislation_A_5: sections 1-4 before CHAPTER I → excluded (correct)
+            # - legislation_A_2: section 1 after CHAPTER 80 → included (correct)
+            should_exclude_section_1 = False
+
+            if 1 in sections_in_range:
+                # Always exclude section 1 from numbered PARTS
+                if item['type'] == 'PART' and item.get('identifier', '') != 'MAIN':
+                    should_exclude_section_1 = True
+                    if self.debug_mode:
+                        print(f"  [SECTION 1] Excluding from PART {item.get('identifier')}")
+                # For chapters, exclude section 1 unless it's the first UNIQUE chapter
+                elif item['type'] == 'CHAPTER':
+                    # Check if this is the first occurrence of ANY chapter (no previous CHAPTER items with different identifiers)
+                    current_identifier = item.get('identifier', '')
+                    previous_chapter_identifiers = set()
+                    for prev_item in found_items[:i]:
+                        if prev_item['type'] == 'CHAPTER':
+                            prev_id = prev_item.get('identifier', '')
+                            if prev_id and prev_id != current_identifier:
+                                previous_chapter_identifiers.add(prev_id)
+
+                    is_first_unique_chapter = len(previous_chapter_identifiers) == 0
+                    if self.debug_mode:
+                        print(f"  [SECTION 1] {item.get('number')}: is_first_unique_chapter={is_first_unique_chapter}, previous_chapters={previous_chapter_identifiers}")
+
+                    if not is_first_unique_chapter:
+                        # Not the first unique chapter, exclude section 1
+                        should_exclude_section_1 = True
+                    # else: is first unique chapter, keep section 1 if it appears after the chapter heading
+
+            if should_exclude_section_1:
+                sections_in_range = [n for n in sections_in_range if n != 1]
+                if self.debug_mode:
+                    print(f"  [SECTION 1] Excluded, new range: {sections_in_range}")
 
             if sections_in_range:
                 # Filter out outliers: if there's a big gap, keep only the main cluster
@@ -5152,6 +5460,7 @@ class MainHTMLProcessor:
 
         # ========== EXTRACT BASIC METADATA ==========
         title, description = self.extract_title_and_description(soup)
+        repeal_info = self.extract_repeal_info(soup)
         preamble_list = self.extract_preamble(soup)
         numbers_block = self.extract_law_act_ordinance_data(soup)
         enactment_date = self.extract_enachment_date(soup)
@@ -5162,10 +5471,14 @@ class MainHTMLProcessor:
         if self.debug_mode:
             print(f"Basic metadata extracted:")
             print(f"  Title: {title}")
+            if repeal_info:
+                print(f"  Repeal Info: {repeal_info.get('repeal_text', 'N/A')}")
             print(f"  Enactment: {enactment_date}")
             print(f"  Schedules: {len(schedules)}")
 
         # ========== EXTRACT VISIBLE SECTIONS FROM DOM ==========
+        # NOTE: For legislation_C_89, we use standard extraction here and reorganize later
+        # after all sections (visible + rescued) are collected
         visible_parts = self.extract_parts_with_section_groups(soup) or []
 
         if self.debug_mode:
@@ -5367,8 +5680,59 @@ class MainHTMLProcessor:
         # ========== USE MASTER ROUTING FUNCTION ==========
         if self.debug_mode:
             print(f"\n=== USING MASTER ROUTING FUNCTION ===")
-        
-        final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+
+        # SPECIAL HANDLING: Use specialized reorganization for procedure codes
+        # Both Civil Procedure Code (C_89) and Code of Criminal Procedure (C_101)
+        # have PART headers in hidden input field that require special handling
+        if doc_id in ['legislation_C_89', 'legislation_C_101']:
+            if self.debug_mode:
+                code_name = "Civil Procedure Code" if doc_id == 'legislation_C_89' else "Code of Criminal Procedure"
+                print(f"  Using specialized reorganization for {code_name} ({len(all_sections)} sections)")
+
+            # For C_89, extract full PART/CHAPTER hierarchy
+            # For C_101, use simpler PART-only extraction
+            if doc_id == 'legislation_C_89':
+                # Extract PART and CHAPTER boundaries
+                parts_with_chapters = self.extract_parts_and_chapters_from_hidden_input(soup)
+
+                if parts_with_chapters:
+                    # Create temporary structure with all sections
+                    temp_parts = [{
+                        'part_number': 'TEMP',
+                        'part_title': None,
+                        'section_groups': [{
+                            'title': None,
+                            'sections': all_sections
+                        }]
+                    }]
+
+                    # Reorganize with PART > CHAPTER hierarchy
+                    final_parts = self.reorganize_sections_with_chapters(temp_parts, parts_with_chapters)
+                else:
+                    # Fallback to standard routing
+                    final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+            else:
+                # For C_101 and others, use simpler PART-only extraction
+                part_boundaries = self.extract_parts_from_hidden_input_c89(soup)
+
+                if part_boundaries:
+                    # Create temporary structure with all sections
+                    temp_parts = [{
+                        'part_number': 'TEMP',
+                        'part_title': None,
+                        'section_groups': [{
+                            'title': None,
+                            'sections': all_sections
+                        }]
+                    }]
+
+                    # Reorganize using simpler PART-only logic
+                    final_parts = self.reorganize_sections_by_part_c89(temp_parts, part_boundaries)
+                else:
+                    # Fallback to standard routing
+                    final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+        else:
+            final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
 
         if self.debug_mode:
             print(f"Final parts created: {len(final_parts)}")
@@ -5457,6 +5821,10 @@ class MainHTMLProcessor:
             "parts": final_parts or [],
             "statistics": stats,
         }
+
+        # Add repeal information if present
+        if repeal_info:
+            json_data["repeal_info"] = repeal_info
 
         if self.debug_mode:
             print(f"\n=== JSON CONSTRUCTION COMPLETE ===")
@@ -7306,26 +7674,34 @@ class MainHTMLProcessor:
             # Sort chapters by their identifier (roman numeral order)
             sorted_all_chapters = sorted(chapters, key=extract_chapter_num)
 
-            # Special case: If the first chapter has min > 1 AND section 1 exists, extend it to start at 1
-            # This handles cases like legislation_A_3 where CHAPTER 75 starts at section 2
-            # but section 1 should also be in this chapter
-            # IMPORTANT: Only extend if section 1 actually exists (some legislations start at section 2)
-            if sorted_all_chapters:
+            # DISABLED: Auto-extension of first chapter to include section 1
+            # This was causing issues where sections appearing BEFORE a chapter heading in the DOM
+            # were incorrectly included in that chapter (e.g., legislation_A_5 where sections 1-4
+            # appear before CHAPTER I heading, but were being included in CHAPTER I)
+            #
+            # The proper behavior is: sections should only be in a chapter if they appear AFTER
+            # the chapter heading in the DOM, not based on numerical order.
+            #
+            # Keeping this code commented for reference:
+            # if sorted_all_chapters:
+            #     first_ch = sorted_all_chapters[0]
+            #     first_min = first_ch.get('min')
+            #     if isinstance(first_min, int) and first_min > 1:
+            #         section_1_exists = any(
+            #             str(s.get('number', '')).strip() == '1'
+            #             for s in all_sections
+            #         )
+            #         if section_1_exists:
+            #             if self.debug_mode:
+            #                 print(f"  Extending first chapter {first_ch['number']} min from {first_min} to 1 (section 1 exists)")
+            #             first_ch['min'] = 1
+            #         elif self.debug_mode:
+            #             print(f"  NOT extending first chapter {first_ch['number']} - section 1 does not exist (legislation starts at section {first_min})")
+
+            if self.debug_mode and sorted_all_chapters:
                 first_ch = sorted_all_chapters[0]
                 first_min = first_ch.get('min')
-                if isinstance(first_min, int) and first_min > 1:
-                    # Check if section 1 exists in all_sections
-                    section_1_exists = any(
-                        str(s.get('number', '')).strip() == '1'
-                        for s in all_sections
-                    )
-
-                    if section_1_exists:
-                        if self.debug_mode:
-                            print(f"  Extending first chapter {first_ch['number']} min from {first_min} to 1 (section 1 exists)")
-                        first_ch['min'] = 1
-                    elif self.debug_mode:
-                        print(f"  NOT extending first chapter {first_ch['number']} - section 1 does not exist (legislation starts at section {first_min})")
+                print(f"  First chapter {first_ch.get('number')} min={first_min} (NOT auto-extending to include earlier sections)")
 
             # Second pass: Fix gaps and assign None values
             for i in range(len(sorted_all_chapters) - 1):
@@ -9514,6 +9890,525 @@ class MainHTMLProcessor:
         """Set the paths for HTML input and JSON output folders."""
         self.html_folder = html_folder
         self.data_folder = data_folder
+
+    # ============================================================================
+    # SPECIALIZED FUNCTIONS FOR LEGISLATION_C_89 (CIVIL PROCEDURE CODE)
+    # ============================================================================
+
+    def extract_parts_from_hidden_input_c89(self, soup):
+        """
+        Extract PART headers and their section ranges from the hidden input field.
+        Specific to legislation_C_89 (Civil Procedure Code).
+
+        Returns: List of dicts with part_number, part_title, section_start, section_end
+        """
+        import re
+
+        hidden_input = soup.find('input', attrs={'name': 'selectedhtml', 'type': 'hidden'})
+        if not hidden_input:
+            if self.debug_mode:
+                print("  [C89] No hidden input found")
+            return []
+
+        hidden_text = hidden_input.get('value', '')
+        if not hidden_text:
+            if self.debug_mode:
+                print("  [C89] Hidden input is empty")
+            return []
+
+        if self.debug_mode:
+            print(f"  [C89] Hidden input length: {len(hidden_text)} characters")
+
+        # Find all PART headers in the hidden text
+        # Pattern: PART [ROMAN] followed by optional title
+        part_pattern = re.compile(
+            r'^\s*PART\s+([IVXLCDM]+)\s*$',
+            re.MULTILINE
+        )
+
+        # Find all section numbers in the hidden text
+        section_pattern = re.compile(
+            r'^\s*(\d+[A-Z]?)\s*\.',
+            re.MULTILINE
+        )
+
+        parts = []
+        part_matches = list(part_pattern.finditer(hidden_text))
+
+        if self.debug_mode:
+            print(f"  [C89] Found {len(part_matches)} PART headers in hidden input")
+
+        for i, part_match in enumerate(part_matches):
+            part_roman = part_match.group(1)
+            part_start_pos = part_match.start()
+
+            # Find the next PART or end of text
+            if i + 1 < len(part_matches):
+                part_end_pos = part_matches[i + 1].start()
+            else:
+                part_end_pos = len(hidden_text)
+
+            # Extract text for this PART
+            part_text = hidden_text[part_start_pos:part_end_pos]
+
+            # Find title (usually on the next line after PART)
+            lines = part_text.split('\n')
+            part_title = None
+            for j, line in enumerate(lines[1:5], 1):  # Check next 4 lines
+                line_stripped = line.strip()
+                if line_stripped and not re.match(r'^\d+[A-Z]?\s*\.', line_stripped):
+                    # This looks like a title (not a section number)
+                    if 'CHAPTER' not in line_stripped:
+                        part_title = line_stripped
+                        break
+
+            # Find all section numbers in this PART's text
+            section_matches = list(section_pattern.finditer(part_text))
+
+            section_numbers = []
+            for sec_match in section_matches:
+                sec_num = sec_match.group(1)
+                section_numbers.append(sec_num)
+
+            # Determine section range
+            if section_numbers:
+                # Convert section numbers to integers for comparison
+                section_ints = []
+                for sec in section_numbers:
+                    match = re.match(r'(\d+)', sec)
+                    if match:
+                        section_ints.append(int(match.group(1)))
+
+                if section_ints:
+                    min_section = min(section_ints)
+                    max_section = max(section_ints)
+                else:
+                    min_section = max_section = None
+            else:
+                min_section = max_section = None
+
+            part_info = {
+                'part_number': f'PART {part_roman}',
+                'part_title': part_title,
+                'section_start': min_section,
+                'section_end': max_section,
+                'section_count': len(section_numbers)
+            }
+
+            parts.append(part_info)
+
+            if self.debug_mode:
+                print(f"  [C89] {part_info['part_number']}: {part_info['part_title']}")
+                print(f"        Sections: {min_section}-{max_section} ({len(section_numbers)} sections)")
+
+        return parts
+
+    def extract_parts_and_chapters_from_hidden_input(self, soup):
+        """
+        Extract complete PART and CHAPTER hierarchy from hidden input field.
+        Returns: List of PARTs, each containing list of CHAPTERs with their sections.
+
+        Structure:
+        [
+            {
+                'part_number': 'PART I',
+                'part_title': '...',
+                'chapters': [
+                    {
+                        'chapter_number': 'CHAPTER I',
+                        'chapter_title': '...',
+                        'section_start': 1,
+                        'section_end': 10
+                    },
+                    ...
+                ]
+            },
+            ...
+        ]
+        """
+        import re
+
+        hidden_input = soup.find('input', attrs={'name': 'selectedhtml', 'type': 'hidden'})
+        if not hidden_input:
+            return []
+
+        hidden_text = hidden_input.get('value', '')
+        if not hidden_text:
+            return []
+
+        if self.debug_mode:
+            print(f"  [C89+CHAPTERS] Hidden input length: {len(hidden_text)} characters")
+
+        # Find all PART and CHAPTER headers
+        part_pattern = re.compile(r'^\s*PART\s+([IVXLCDM]+)\s*$', re.MULTILINE)
+        chapter_pattern = re.compile(r'^\s*CHAPTER\s+([IVXLCDM]+[A-Z]?)\s*$', re.MULTILINE)
+        section_pattern = re.compile(r'^\s*(\d+[A-Z]?)\s*\.', re.MULTILINE)
+
+        part_matches = list(part_pattern.finditer(hidden_text))
+        chapter_matches = list(chapter_pattern.finditer(hidden_text))
+
+        if self.debug_mode:
+            print(f"  [C89+CHAPTERS] Found {len(part_matches)} PARTs and {len(chapter_matches)} CHAPTERs")
+
+        parts = []
+
+        for i, part_match in enumerate(part_matches):
+            part_roman = part_match.group(1)
+            part_start_pos = part_match.start()
+
+            # Find the next PART or end of text
+            if i + 1 < len(part_matches):
+                part_end_pos = part_matches[i + 1].start()
+            else:
+                part_end_pos = len(hidden_text)
+
+            # Extract text for this PART
+            part_text = hidden_text[part_start_pos:part_end_pos]
+
+            # Find PART title
+            lines = part_text.split('\n')
+            part_title = None
+            for j, line in enumerate(lines[1:5], 1):
+                line_stripped = line.strip()
+                if line_stripped and not re.match(r'^\d+[A-Z]?\s*\.', line_stripped) and 'CHAPTER' not in line_stripped:
+                    part_title = line_stripped
+                    break
+
+            # Find all CHAPTERs in this PART
+            chapters = []
+            for ch_match in chapter_matches:
+                # Check if this chapter is within this PART's range
+                if part_start_pos <= ch_match.start() < part_end_pos:
+                    chapter_roman = ch_match.group(1)
+                    chapter_start_pos = ch_match.start()
+
+                    # Find the next CHAPTER or end of PART
+                    chapter_end_pos = part_end_pos
+                    for next_ch in chapter_matches:
+                        if next_ch.start() > chapter_start_pos and next_ch.start() < part_end_pos:
+                            chapter_end_pos = next_ch.start()
+                            break
+
+                    # Extract text for this CHAPTER
+                    chapter_text = hidden_text[chapter_start_pos:chapter_end_pos]
+
+                    # Find CHAPTER title (look in visible DOM for more accurate titles)
+                    chapter_title = None
+
+                    # Find all sections in this CHAPTER
+                    section_matches = list(section_pattern.finditer(chapter_text))
+                    section_numbers = [sm.group(1) for sm in section_matches]
+
+                    if section_numbers:
+                        section_ints = []
+                        for sec in section_numbers:
+                            match = re.match(r'(\d+)', sec)
+                            if match:
+                                section_ints.append(int(match.group(1)))
+
+                        if section_ints:
+                            chapters.append({
+                                'chapter_number': f'CHAPTER {chapter_roman}',
+                                'chapter_title': chapter_title,
+                                'section_start': min(section_ints),
+                                'section_end': max(section_ints),
+                                'section_count': len(section_numbers)
+                            })
+
+            # If no chapters found, treat entire PART as one group
+            if not chapters:
+                # Find all sections in this PART
+                section_matches = list(section_pattern.finditer(part_text))
+                section_numbers = [sm.group(1) for sm in section_matches]
+
+                if section_numbers:
+                    section_ints = []
+                    for sec in section_numbers:
+                        match = re.match(r'(\d+)', sec)
+                        if match:
+                            section_ints.append(int(match.group(1)))
+
+                    if section_ints:
+                        # Create a default chapter for the whole PART
+                        chapters.append({
+                            'chapter_number': None,
+                            'chapter_title': part_title,
+                            'section_start': min(section_ints),
+                            'section_end': max(section_ints),
+                            'section_count': len(section_numbers)
+                        })
+
+            parts.append({
+                'part_number': f'PART {part_roman}',
+                'part_title': part_title,
+                'chapters': chapters
+            })
+
+            if self.debug_mode:
+                print(f"  [C89+CHAPTERS] {parts[-1]['part_number']}: {len(chapters)} chapters")
+                for ch in chapters[:3]:
+                    ch_num = ch['chapter_number'] or 'No Chapter'
+                    print(f"    {ch_num}: sections {ch['section_start']}-{ch['section_end']}")
+
+        return parts
+
+    def map_section_to_part_c89(self, section_number, part_boundaries):
+        """
+        Determine which PART a section belongs to based on section number.
+
+        Args:
+            section_number: Section number (e.g., "5", "14A", "373")
+            part_boundaries: List from extract_parts_from_hidden_input_c89()
+
+        Returns: part_info dict or None
+        """
+        import re
+
+        # Extract numeric part of section number
+        match = re.match(r'(\d+)', str(section_number))
+        if not match:
+            return None
+
+        sec_num_int = int(match.group(1))
+
+        # Find the PART that contains this section
+        for part_info in part_boundaries:
+            start = part_info.get('section_start')
+            end = part_info.get('section_end')
+
+            if start is not None and end is not None:
+                if start <= sec_num_int <= end:
+                    return part_info
+
+        return None
+
+    def reorganize_sections_by_part_c89(self, parts, part_boundaries):
+        """
+        Reorganize sections into correct PARTs based on section numbers.
+
+        Args:
+            parts: List of part dicts from extract_parts_with_section_groups()
+            part_boundaries: List from extract_parts_from_hidden_input_c89()
+
+        Returns: Reorganized list of parts
+        """
+        if self.debug_mode:
+            print("\n=== REORGANIZING SECTIONS FOR CIVIL PROCEDURE CODE ===")
+
+        # Collect all sections from all parts
+        all_sections = []
+        for part in parts:
+            for group in part.get('section_groups', []):
+                for section in group.get('sections', []):
+                    all_sections.append(section)
+
+        if self.debug_mode:
+            print(f"  Total sections collected: {len(all_sections)}")
+
+        # Create new PART structure based on part_boundaries
+        new_parts = []
+        for part_info in part_boundaries:
+            new_part = {
+                'part_number': part_info['part_number'],
+                'part_title': part_info['part_title'],
+                'section_groups': [
+                    {
+                        'title': part_info['part_title'],
+                        'sections': []
+                    }
+                ]
+            }
+            new_parts.append(new_part)
+
+        # Add a MAIN PART for sections that don't fit anywhere
+        main_part = {
+            'part_number': 'MAIN PART',
+            'part_title': None,
+            'section_groups': [
+                {
+                    'title': 'Preliminary',
+                    'sections': []
+                }
+            ]
+        }
+
+        # Assign each section to its correct PART
+        unassigned_sections = []
+        for section in all_sections:
+            sec_num = section.get('number')
+            part_info = self.map_section_to_part_c89(sec_num, part_boundaries)
+
+            if part_info:
+                # Find the corresponding new_part
+                for new_part in new_parts:
+                    if new_part['part_number'] == part_info['part_number']:
+                        new_part['section_groups'][0]['sections'].append(section)
+                        break
+            else:
+                # Assign to MAIN PART
+                unassigned_sections.append(section)
+
+        # Add unassigned sections to MAIN PART
+        if unassigned_sections:
+            main_part['section_groups'][0]['sections'] = unassigned_sections
+            new_parts.insert(0, main_part)
+
+            if self.debug_mode:
+                print(f"  Unassigned sections: {len(unassigned_sections)}")
+
+        # Sort sections within each PART
+        for part in new_parts:
+            for group in part.get('section_groups', []):
+                sections = group.get('sections', [])
+                if sections:
+                    # Sort by section number
+                    sections.sort(key=lambda s: self._extract_num_alpha(s.get('number', ''))[0] or 0)
+
+        # Remove empty parts
+        new_parts = [p for p in new_parts if any(
+            len(g.get('sections', [])) > 0 for g in p.get('section_groups', [])
+        )]
+
+        if self.debug_mode:
+            print(f"\n  Final PART structure:")
+            for part in new_parts:
+                total_sections = sum(len(g.get('sections', [])) for g in part.get('section_groups', []))
+                if total_sections > 0:
+                    all_sec_nums = []
+                    for g in part.get('section_groups', []):
+                        all_sec_nums.extend([s.get('number') for s in g.get('sections', [])])
+                    print(f"    {part['part_number']}: {total_sections} sections")
+                    if all_sec_nums:
+                        print(f"      Range: {all_sec_nums[0]} to {all_sec_nums[-1]}")
+
+        return new_parts
+
+    def reorganize_sections_with_chapters(self, parts, parts_with_chapters):
+        """
+        Reorganize sections into PART > CHAPTER > Section hierarchy.
+
+        Args:
+            parts: List of part dicts from extract_parts_with_section_groups()
+            parts_with_chapters: List from extract_parts_and_chapters_from_hidden_input()
+
+        Returns: Reorganized list of parts with chapters
+        """
+        if self.debug_mode:
+            print("\n=== REORGANIZING SECTIONS WITH CHAPTER HIERARCHY ===")
+
+        # Collect all sections from all parts
+        all_sections = []
+        for part in parts:
+            for group in part.get('section_groups', []):
+                for section in group.get('sections', []):
+                    all_sections.append(section)
+
+        if self.debug_mode:
+            print(f"  Total sections collected: {len(all_sections)}")
+
+        # Create new structure with PARTs and CHAPTERs
+        new_parts = []
+
+        for part_info in parts_with_chapters:
+            new_part = {
+                'part_number': part_info['part_number'],
+                'part_title': part_info['part_title'],
+                'chapters': []
+            }
+
+            # Create chapters within this PART
+            for chapter_info in part_info.get('chapters', []):
+                new_chapter = {
+                    'chapter_number': chapter_info['chapter_number'],
+                    'chapter_title': chapter_info['chapter_title'],
+                    'section_groups': [
+                        {
+                            'title': chapter_info['chapter_title'],
+                            'sections': []
+                        }
+                    ]
+                }
+
+                # Assign sections to this chapter
+                for section in all_sections:
+                    sec_num = section.get('number')
+                    # Extract numeric part
+                    import re
+                    match = re.match(r'(\d+)', str(sec_num))
+                    if match:
+                        sec_num_int = int(match.group(1))
+                        ch_start = chapter_info['section_start']
+                        ch_end = chapter_info['section_end']
+
+                        if ch_start <= sec_num_int <= ch_end:
+                            new_chapter['section_groups'][0]['sections'].append(section)
+
+                # Only add chapter if it has sections
+                if new_chapter['section_groups'][0]['sections']:
+                    new_part['chapters'].append(new_chapter)
+
+            # Only add part if it has chapters
+            if new_part['chapters']:
+                new_parts.append(new_part)
+
+        # Sort sections within each chapter
+        for part in new_parts:
+            for chapter in part.get('chapters', []):
+                for group in chapter.get('section_groups', []):
+                    sections = group.get('sections', [])
+                    if sections:
+                        sections.sort(key=lambda s: self._extract_num_alpha(s.get('number', ''))[0] or 0)
+
+        if self.debug_mode:
+            print(f"\n  Final structure:")
+            for part in new_parts:
+                total_sections = sum(
+                    len(g.get('sections', []))
+                    for ch in part.get('chapters', [])
+                    for g in ch.get('section_groups', [])
+                )
+                print(f"    {part['part_number']}: {len(part.get('chapters', []))} chapters, {total_sections} sections")
+                for ch in part.get('chapters', [])[:2]:
+                    ch_sections = []
+                    for g in ch.get('section_groups', []):
+                        ch_sections.extend([s.get('number') for s in g.get('sections', [])])
+                    if ch_sections:
+                        print(f"      {ch['chapter_number']}: {len(ch_sections)} sections ({ch_sections[0]}-{ch_sections[-1]})")
+
+        return new_parts
+
+    def process_legislation_c89(self, soup, legislation_id):
+        """
+        Main processing function for legislation_C_89 (Civil Procedure Code).
+        Handles the unique structure with PART headers in hidden input field.
+
+        Args:
+            soup: BeautifulSoup object
+            legislation_id: "legislation_C_89"
+
+        Returns: Properly structured parts list
+        """
+        if self.debug_mode:
+            print("\n" + "="*70)
+            print("PROCESSING CIVIL PROCEDURE CODE (LEGISLATION_C_89)")
+            print("Using specialized handler for hidden input PART structure")
+            print("="*70 + "\n")
+
+        # Step 1: Extract PART boundaries from hidden input
+        part_boundaries = self.extract_parts_from_hidden_input_c89(soup)
+
+        if not part_boundaries:
+            if self.debug_mode:
+                print("  [C89] No PART boundaries found, falling back to standard processing")
+            return self.extract_parts_with_section_groups(soup)
+
+        # Step 2: Extract sections using standard method
+        parts = self.extract_parts_with_section_groups(soup)
+
+        # Step 3: Reorganize sections into correct PARTs
+        reorganized_parts = self.reorganize_sections_by_part_c89(parts, part_boundaries)
+
+        return reorganized_parts
 
 
 # Example usage

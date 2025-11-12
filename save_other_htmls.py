@@ -199,43 +199,47 @@ class AmendmentScheduleHTMLScraper:
         except Exception as e:
             print(f"Error occurred while scraping {safe_file_name}: {e}")
 
+    def extract_all_amendments(self, data):
+        """Recursively extract all amendment links from any level in the legislation data."""
+        amendments = []
+        if isinstance(data, dict):
+            # If there's an 'amendment' key, extract it
+            if 'amendment' in data and isinstance(data['amendment'], list):
+                amendments.extend(data['amendment'])
+            
+            # Recurse into all values
+            for value in data.values():
+                amendments.extend(self.extract_all_amendments(value))
+        elif isinstance(data, list):
+            for item in data:
+                amendments.extend(self.extract_all_amendments(item))
+        return amendments
+    
     def save_amendment_html(self, legislation_data, json_file_name):
         try:
-            # Check if 'introduction' exists in the legislation data
-            if 'introduction' not in legislation_data:
-                print(f"Key 'introduction' not found in {json_file_name}")
-                return
-                
-            # Get the lists of amendments
-            amendments = []
+            print(f"🔍 Searching for amendments in {json_file_name}...")
             
-            if 'act_numbers' in legislation_data['introduction']:
-                amendments.extend(legislation_data['introduction']['act_numbers'])
-            
-            if 'law_numbers' in legislation_data['introduction']:
-                amendments.extend(legislation_data['introduction']['law_numbers'])
-                
-            if 'ordinance_numbers' in legislation_data['introduction']:
-                amendments.extend(legislation_data['introduction']['ordinance_numbers'])
+            # Collect all amendment entries recursively
+            amendments = self.extract_all_amendments(legislation_data)
+            print(f"  ➜ Found {len(amendments)} amendment(s) total")
             
             # Create folder name from JSON file name (without .json extension)
             folder_name = json_file_name.replace('.json', '')
-            
-            # Create a corresponding folder in the 'html' directory
             html_folder_path = os.path.join(self.html_folder, folder_name, 'amendment')
             os.makedirs(html_folder_path, exist_ok=True)
             
-            # Loop through each amendment
+            # Loop through each amendment link
             for amendment in amendments:
-                amendment_link = amendment.get('amendment_link')
-                number = amendment.get('number')
+                amendment_link = amendment.get('link') or amendment.get('amendment_link')
+                text = amendment.get('text') or amendment.get('number')
                 
-                if amendment_link and number:
-                    self.scrape_html_content(amendment_link, html_folder_path, number)
-                    # Add a random delay between requests
+                if amendment_link and text:
+                    safe_name = text.replace("[", "").replace("]", "").replace(" ", "_")
+                    self.scrape_html_content(amendment_link, html_folder_path, safe_name)
                     time.sleep(random.uniform(5, 15))
                 else:
-                    print(f"Missing amendment_link or number for amendment in {json_file_name}")
+                    print(f"  ⚠️ Missing amendment link or text: {amendment}")
+                    
         except Exception as e:
             print(f"Error processing amendments for {json_file_name}: {e}")
 
