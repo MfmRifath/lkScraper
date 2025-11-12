@@ -4287,7 +4287,37 @@ class MainHTMLProcessor:
                         parts_dict[key] = src
             elif src.get("number", "").startswith("CHAPTER"):
                 chapters_list.append(src)
-        
+
+        # FIX PART GAPS BEFORE ASSIGNING CHAPTERS
+        # Sort parts by min section number
+        if parts_dict:
+            if self.debug_mode:
+                print(f"  [TEXTUAL] Found {len(parts_dict)} parts before gap fixing:")
+                for pk, pv in parts_dict.items():
+                    print(f"    {pk}: min={pv.get('min')}, max={pv.get('max')}")
+
+            sorted_parts = sorted(parts_dict.values(), key=lambda p: p.get("min", 0))
+
+            # Extend part ranges to cover gaps between parts
+            for i in range(len(sorted_parts) - 1):
+                current_part = sorted_parts[i]
+                next_part = sorted_parts[i + 1]
+
+                current_max = current_part.get("max")
+                next_min = next_part.get("min")
+
+                if current_max and next_min and current_max < next_min - 1:
+                    # There's a gap - extend current part's max to cover it
+                    gap_size = next_min - current_max - 1
+                    new_max = next_min - 1
+
+                    if self.debug_mode:
+                        print(f"  [TEXTUAL] Fixing gap: Extending {current_part['number']} max from {current_max} to {new_max} (covers {gap_size} sections)")
+
+                    # Extend current part to cover the gap
+                    # This ensures chapters falling in the gap get assigned to the correct part
+                    current_part["max"] = new_max
+
         # Now assign chapters to parts based on their ranges
         for chapter in chapters_list:
             ch_min = chapter["min"]
@@ -8821,7 +8851,29 @@ class MainHTMLProcessor:
                     'chapters': []
                 }
                 structure.append(part_obj)
-            
+
+            # FIX PART GAPS BEFORE ASSIGNING CHAPTERS
+            # Sort structure by min section number
+            structure.sort(key=lambda p: p.get('min', 0))
+
+            # Extend part ranges to cover gaps between parts
+            for i in range(len(structure) - 1):
+                current_part = structure[i]
+                next_part = structure[i + 1]
+
+                current_max = current_part.get('max')
+                next_min = next_part.get('min')
+
+                if current_max and next_min and current_max < next_min - 1:
+                    # There's a gap - extend current part's max to cover it
+                    gap_size = next_min - current_max - 1
+                    new_max = next_min - 1
+
+                    if self.debug_mode:
+                        print(f"  [ORGANIZE] Fixing gap: Extending {current_part['number']} max from {current_max} to {new_max} (covers {gap_size} sections)")
+
+                    current_part['max'] = new_max
+
             # Assign chapters to parts based on section ranges
             for chapter in sorted_chapters:
                 assigned = False
