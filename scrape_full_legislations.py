@@ -5718,33 +5718,9 @@ class MainHTMLProcessor:
         # SPECIAL HANDLING: Use specialized reorganization for procedure codes
         # Both Civil Procedure Code (C_89) and Code of Criminal Procedure (C_101)
         # have PART headers in hidden input field that require special handling
-        if doc_id in ['legislation_C_89', 'legislation_C_101']:
-            if self.debug_mode:
-                code_name = "Civil Procedure Code" if doc_id == 'legislation_C_89' else "Code of Criminal Procedure"
-                print(f"  Using specialized reorganization for {code_name} ({len(all_sections)} sections)")
-
-            # Both C_89 and C_101 have full PART/CHAPTER hierarchy in hidden input
-            # Extract PART and CHAPTER boundaries
-            parts_with_chapters = self.extract_parts_and_chapters_from_hidden_input(soup)
-
-            if parts_with_chapters:
-                # Create temporary structure with all sections
-                temp_parts = [{
-                    'part_number': 'TEMP',
-                    'part_title': None,
-                    'section_groups': [{
-                        'title': None,
-                        'sections': all_sections
-                    }]
-                }]
-
-                # Reorganize with PART > CHAPTER hierarchy
-                final_parts = self.reorganize_sections_with_chapters(temp_parts, parts_with_chapters)
-            else:
-                # Fallback to standard routing
-                final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
-        else:
-            final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
+        # Use standard routing for all legislations (including C_89 and C_101)
+        # This ensures consistent format across all legislations
+        final_parts = self.master_route_sections_to_structure(all_sections, textual_containers, full_text)
 
         if self.debug_mode:
             print(f"Final parts created: {len(final_parts)}")

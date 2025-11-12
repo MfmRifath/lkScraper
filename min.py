@@ -138,9 +138,9 @@ def main():
     }
     
     # Define paths - Update these as needed for your specific legislation folder
-    json_file_path = "data/json/legislation_C.json"
-    html_folder = "data/html/legislation_C"
-    data_folder = "data/legislations/legislation_C"
+    json_file_path = "data/json/legislation_A.json"
+    html_folder = "data/html/legislation_A"
+    data_folder = "data/legislations/legislation_A"
     
     print("Pipeline Configuration:")
     print(f"  JSON file: {json_file_path}")
