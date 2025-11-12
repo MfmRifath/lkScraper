@@ -10052,6 +10052,70 @@ class MainHTMLProcessor:
 
         parts = []
 
+        # IMPORTANT: Check for content BEFORE the first PART (CHAPTER I - PRELIMINARY)
+        # This contains sections 1, 4, 5 that come before PART I
+        if part_matches:
+            first_part_pos = part_matches[0].start()
+
+            # Check if there are chapters before the first PART
+            preliminary_chapters = []
+            for ch_match in chapter_matches:
+                if ch_match.start() < first_part_pos:
+                    chapter_roman = ch_match.group(1)
+                    chapter_start_pos = ch_match.start()
+
+                    # Find the next CHAPTER or the first PART as end position
+                    chapter_end_pos = first_part_pos
+                    for next_ch in chapter_matches:
+                        if next_ch.start() > chapter_start_pos and next_ch.start() < first_part_pos:
+                            chapter_end_pos = next_ch.start()
+                            break
+
+                    # Extract text for this CHAPTER
+                    chapter_text = hidden_text[chapter_start_pos:chapter_end_pos]
+
+                    # Find CHAPTER title
+                    lines = chapter_text.split('\n')
+                    chapter_title = None
+                    for j, line in enumerate(lines[1:5], 1):
+                        line_stripped = line.strip()
+                        if line_stripped and not re.match(r'^\d+[A-Z]?\s*\.', line_stripped) and 'CHAPTER' not in line_stripped:
+                            chapter_title = line_stripped
+                            break
+
+                    # Find all sections in this CHAPTER
+                    section_matches = list(section_pattern.finditer(chapter_text))
+                    section_numbers = [sm.group(1) for sm in section_matches]
+
+                    if section_numbers:
+                        section_ints = []
+                        for sec in section_numbers:
+                            match = re.match(r'(\d+)', sec)
+                            if match:
+                                section_ints.append(int(match.group(1)))
+
+                        if section_ints:
+                            preliminary_chapters.append({
+                                'chapter_number': f'CHAPTER {chapter_roman}',
+                                'chapter_title': chapter_title,
+                                'section_start': min(section_ints),
+                                'section_end': max(section_ints),
+                                'section_count': len(section_numbers)
+                            })
+
+            # If we found preliminary chapters, create a MAIN PART for them
+            if preliminary_chapters:
+                parts.append({
+                    'part_number': 'MAIN PART',
+                    'part_title': 'PRELIMINARY',
+                    'chapters': preliminary_chapters
+                })
+
+                if self.debug_mode:
+                    print(f"  [C89+CHAPTERS] MAIN PART (PRELIMINARY): {len(preliminary_chapters)} chapters")
+                    for ch in preliminary_chapters:
+                        print(f"    {ch['chapter_number']}: {ch.get('chapter_title', 'N/A')} - sections {ch['section_start']}-{ch['section_end']}")
+
         for i, part_match in enumerate(part_matches):
             part_roman = part_match.group(1)
             part_start_pos = part_match.start()
