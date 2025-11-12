@@ -4296,7 +4296,7 @@ class MainHTMLProcessor:
                 for pk, pv in parts_dict.items():
                     print(f"    {pk}: min={pv.get('min')}, max={pv.get('max')}")
 
-            sorted_parts = sorted(parts_dict.values(), key=lambda p: p.get("min", 0))
+            sorted_parts = sorted(parts_dict.values(), key=lambda p: p.get("min") if p.get("min") is not None else 999999)
 
             # Extend part ranges to cover gaps between parts
             for i in range(len(sorted_parts) - 1):
@@ -4306,7 +4306,11 @@ class MainHTMLProcessor:
                 current_max = current_part.get("max")
                 next_min = next_part.get("min")
 
-                if current_max and next_min and current_max < next_min - 1:
+                # Skip if either value is None
+                if current_max is None or next_min is None:
+                    continue
+
+                if current_max < next_min - 1:
                     # There's a gap - extend current part's max to cover it
                     gap_size = next_min - current_max - 1
                     new_max = next_min - 1
@@ -8853,8 +8857,8 @@ class MainHTMLProcessor:
                 structure.append(part_obj)
 
             # FIX PART GAPS BEFORE ASSIGNING CHAPTERS
-            # Sort structure by min section number
-            structure.sort(key=lambda p: p.get('min', 0))
+            # Sort structure by min section number (handle None values)
+            structure.sort(key=lambda p: p.get('min') if p.get('min') is not None else 999999)
 
             # Extend part ranges to cover gaps between parts
             for i in range(len(structure) - 1):
@@ -8864,7 +8868,11 @@ class MainHTMLProcessor:
                 current_max = current_part.get('max')
                 next_min = next_part.get('min')
 
-                if current_max and next_min and current_max < next_min - 1:
+                # Skip if either value is None
+                if current_max is None or next_min is None:
+                    continue
+
+                if current_max < next_min - 1:
                     # There's a gap - extend current part's max to cover it
                     gap_size = next_min - current_max - 1
                     new_max = next_min - 1
