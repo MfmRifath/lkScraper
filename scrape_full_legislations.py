@@ -3631,8 +3631,8 @@ class MainHTMLProcessor:
         
         # Find PARTS
         part_patterns = [
-            re.compile(r'(?m)^\s*["\']?\s*PART\s+([IVXLCDM]+[A-Z]?)(?:\s|$|\.)', re.I),
-            re.compile(r'(?m)^\s*["\']?\s*PART\s+(\d+[A-Z]?)(?:\s|$|\.)', re.I),
+            re.compile(r'(?m)^\s*["\']?\s*PART\s+([IVXLCDM]+)(?:\s|$|\.)', re.I),
+            re.compile(r'(?m)^\s*["\']?\s*PART\s+(\d+)(?:\s|$|\.)', re.I),
         ]
         
         for pattern in part_patterns:
@@ -5694,7 +5694,12 @@ class MainHTMLProcessor:
                     if self.debug_mode:
                         print(f"    Created DOM-based container: {part_number} [{min_section}-{max_section}]")
         else:
-            textual_containers = self.extract_textual_parts_and_groups(full_text) or []
+            # For C_89 and C_101, extract PART boundaries directly from hidden input
+            # This ensures correct PART ranges that may not be visible in DOM
+            if doc_id in ['legislation_C_89', 'legislation_C_101']:
+                textual_containers = self._extract_parts_from_hidden_input_procedure_codes(soup, full_text)
+            else:
+                textual_containers = self.extract_textual_parts_and_groups(full_text) or []
         
         # Deduplicate textual containers
         seen_containers = set()
@@ -10016,6 +10021,96 @@ class MainHTMLProcessor:
                 print(f"        Sections: {min_section}-{max_section} ({len(section_numbers)} sections)")
 
         return parts
+
+    def _extract_parts_from_hidden_input_procedure_codes(self, soup, full_text):
+        """
+        Extract PART boundaries directly from hidden input for procedure codes (C_89, C_101).
+        Returns textual containers in the same format as extract_textual_parts_and_groups().
+        """
+        import re
+
+        hidden_input = soup.find('input', attrs={'name': 'selectedhtml', 'type': 'hidden'})
+        if not hidden_input:
+            # Fallback to standard extraction
+            return self.extract_textual_parts_and_groups(full_text) or []
+
+        hidden_text = hidden_input.get('value', '')
+        if not hidden_text:
+            return self.extract_textual_parts_and_groups(full_text) or []
+
+        # Find all PART headers
+        part_pattern = re.compile(r'^\s*PART\s+([IVXLCDM]+)\s*$', re.MULTILINE)
+        part_matches = list(part_pattern.finditer(hidden_text))
+
+        # Find all sections
+        section_pattern = re.compile(r'^\s*(\d+[A-Z]?)\s*\.', re.MULTILINE)
+
+        containers = []
+
+        # Check for section 1 before first PART
+        if part_matches:
+            first_part_pos = part_matches[0].start()
+            sections_before = [m.group(1) for m in section_pattern.finditer(hidden_text[:first_part_pos])]
+
+            if sections_before and '1' in sections_before:
+                # Add MAIN PART for section 1
+                containers.append({
+                    'type': 'PART',
+                    'number': 'MAIN PART',
+                    'title': 'PRELIMINARY',
+                    'min': 1,
+                    'max': 1
+                })
+
+        # Extract each PART with its section range
+        for i, pm in enumerate(part_matches):
+            part_roman = pm.group(1)
+            part_start_pos = pm.start()
+
+            # Find next PART or end of text
+            if i + 1 < len(part_matches):
+                part_end_pos = part_matches[i + 1].start()
+            else:
+                part_end_pos = len(hidden_text)
+
+            # Find sections in this PART
+            part_text = hidden_text[part_start_pos:part_end_pos]
+            section_matches = list(section_pattern.finditer(part_text))
+            section_numbers = [m.group(1) for m in section_matches]
+
+            if section_numbers:
+                # Get numeric values for min/max
+                section_ints = []
+                for sec in section_numbers:
+                    match = re.match(r'(\d+)', sec)
+                    if match:
+                        section_ints.append(int(match.group(1)))
+
+                if section_ints:
+                    min_sec = min(section_ints)
+                    max_sec = max(section_ints)
+
+                    # Extract title (next line after PART header)
+                    lines = part_text.split('\n')
+                    title = None
+                    for line in lines[1:5]:
+                        line_stripped = line.strip()
+                        if line_stripped and not re.match(r'^\d+[A-Z]?\s*\.', line_stripped) and not re.match(r'^CHAPTER', line_stripped):
+                            title = line_stripped
+                            break
+
+                    containers.append({
+                        'type': 'PART',
+                        'number': f'PART {part_roman}',
+                        'title': title,
+                        'min': min_sec,
+                        'max': max_sec
+                    })
+
+                    if self.debug_mode:
+                        print(f"  [HIDDEN INPUT] PART {part_roman}: sections {min_sec}-{max_sec} ({len(section_numbers)} sections)")
+
+        return containers
 
     def extract_parts_and_chapters_from_hidden_input(self, soup):
         """
